@@ -13,7 +13,10 @@
   silently reusing an ambient key. It works in any repository and fails closed:
   not logged in, `RCL_NO_HARNESS_KEYS` set or an unreachable backend refuse the
   launch (`harness_keys_unavailable`, no attempt claimed) and never fall back
-  to the environment. Without the flag, the environment still wins.
+  to the environment. A backend that serves no provider keys refuses the same
+  way; one that serves only some names the providers it left out when a launch
+  then refuses for lack of them, and the default roster is no longer trimmed
+  quietly for a missing OpenRouter key. Without the flag, the environment still wins.
 
 ## 4.5.27 - 2026-11-09
 

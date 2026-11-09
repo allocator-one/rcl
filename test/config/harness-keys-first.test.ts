@@ -85,6 +85,33 @@ describe('harness-first key precedence', () => {
     expect(env['ANTHROPIC_API_KEY']).toBe('ambient-ant');
   });
 
+  it('fails closed when Harness serves no keys at all', async () => {
+    const env: Record<string, string | undefined> = { ANTHROPIC_API_KEY: 'ambient-ant' };
+    const result = await applyHarnessModelKeys({
+      cwd: dir,
+      env,
+      credentialsPath,
+      harnessFirst: true,
+      fetchImpl: served({}),
+    });
+
+    expect(result.failure).toMatch(/serves no provider keys/);
+    expect(env['ANTHROPIC_API_KEY']).toBe('ambient-ant');
+  });
+
+  it('names the providers Harness did not serve, so a later refusal can say why', async () => {
+    const result = await applyHarnessModelKeys({
+      cwd: dir,
+      env: {},
+      credentialsPath,
+      harnessFirst: true,
+      fetchImpl: served({ anthropic: 'harness-ant' }),
+    });
+    expect(result.fetchFailure).toBe(
+      'Harness served keys only for anthropic, so --harness-keys-first ignored the environment for openai, google, openrouter'
+    );
+  });
+
   it('fails closed without a stored login', async () => {
     const result = await applyHarnessModelKeys({
       cwd: dir,

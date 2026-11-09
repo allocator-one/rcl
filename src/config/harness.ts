@@ -247,6 +247,12 @@ async function applyHarnessKeysFirst(
     options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))));
   if ('failure' in fetched) return refuse(`could not fetch model keys from ${credentials.url} (${fetched.failure})`);
 
+  // A backend that answers with nothing is as unusable as one that fails: never
+  // proceed on an empty set, which would leave every provider to degrade quietly.
+  if (Object.keys(PROVIDER_ENV_VARS).every(provider => fetched.keys[provider] === undefined)) {
+    return refuse(`Harness at ${credentials.url} serves no provider keys for this login`);
+  }
+
   // Only after the fetch succeeded: a failed one leaves the env untouched.
   for (const name of PROVIDER_KEY_ENV_NAMES) delete env[name];
   const injected: string[] = [];
@@ -257,8 +263,12 @@ async function applyHarnessKeysFirst(
       injected.push(provider);
     }
   }
+  const unserved = Object.keys(PROVIDER_ENV_VARS).filter(provider => !injected.includes(provider));
   return {
     injected,
+    ...(unserved.length > 0
+      ? { fetchFailure: `Harness served keys only for ${injected.join(', ')}, so --harness-keys-first ignored the environment for ${unserved.join(', ')}` }
+      : {}),
     note: `Using ${injected.length > 0 ? injected.join(', ') : 'no'} key(s) from Harness (${credentials.url}), ahead of the environment.`,
   };
 }

@@ -1922,7 +1922,7 @@ async function prepareCouncil(
       'An explicit guarded attempt may only hand off the exact standalone claim for recovered-v3 production.');
   }
   const keyFetchFailure = opts.exportPendingPackage ? undefined : await fetchHarnessKeys(spinner, attestation?.credential, opts.harnessKeysFirst === true);
-  const config = await loadConfig(opts.config, undefined, { preserveDefaultRoster: opts.guardedConverge });
+  const config = await loadConfig(opts.config, undefined, { preserveDefaultRoster: opts.guardedConverge || opts.harnessKeysFirst === true });
 
   // Validate mutually exclusive role options
   const roleOptionCount = [opts.role, opts.roles, opts.reviewer?.length].filter(Boolean).length;
