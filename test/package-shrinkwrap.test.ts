@@ -90,6 +90,7 @@ describe('buildShrinkwrap', () => {
   it.each([
     ['an optional dependency added to package.json', { optionalDependencies: { d: '^1' } }],
     ['a peer dependency added to package.json', { peerDependencies: { d: '^1' } }],
+    ['a peer dependency that became optional in package.json', { peerDependenciesMeta: { a: { optional: true } } }],
     ['a dependency whose range changed', { dependencies: { a: '^2' } }],
     ['a dependency removed from package.json', { dependencies: {} }],
   ])('refuses a lockfile that is stale for %s, which would publish it unpinned', (_label, change) => {

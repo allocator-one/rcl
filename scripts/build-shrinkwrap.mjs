@@ -32,8 +32,9 @@ export function buildShrinkwrap(lock, pkg) {
   }
   const { packages } = lock;
   // The tree below is walked from the lockfile's own root entry, so a dependency package.json gained since
-  // the lockfile was written would be left out of the shrinkwrap without any error.
-  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+  // the lockfile was written would be left out of the shrinkwrap without any error. peerDependenciesMeta
+  // is compared too: it decides which peers the walk follows.
+  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies', 'peerDependenciesMeta']) {
     const sorted = (deps) => JSON.stringify(Object.entries(deps ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
     if (sorted(packages['']?.[field]) !== sorted(pkg[field])) {
       throw new Error(`package-lock.json is out of date: its ${field} differ from package.json; run npm install`);
