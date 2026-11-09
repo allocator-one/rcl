@@ -87,6 +87,13 @@ jobs:
             exit 1
           fi
 
+          # prepack writes npm-shrinkwrap.json; a tarball without it would
+          # publish unpinned dependencies, so refuse it (RCL-208).
+          if ! tar -tf "${packages[0]}" | grep -qx 'package/npm-shrinkwrap.json'; then
+            echo "packed package has no npm-shrinkwrap.json — refusing to publish"
+            exit 1
+          fi
+
           SMOKE_DIR=$(mktemp -d)
           npm install --prefix "$SMOKE_DIR" --ignore-scripts --no-audit --no-fund "./${packages[0]}"
           SMOKE_VERSION=$("$SMOKE_DIR/node_modules/.bin/rcl" --version)

@@ -82,6 +82,17 @@ over the other; installers remove `review-council` first.
    tarball attached (`gh release view vX.Y.Z`). The workflow creates it; if
    that job failed, create it by hand from `node scripts/release-notes.mjs`.
 
+The tarball carries an `npm-shrinkwrap.json` that pins every production
+dependency by version and integrity hash. `npm pack` generates it from
+`package-lock.json` in `prepack` (`scripts/build-shrinkwrap.mjs`, which drops
+development packages) and removes it in `postpack`, so the repository keeps
+`package-lock.json` as its only lockfile and the release job refuses a
+tarball without it. npm applies it to installs from the registry
+(`npm install -g @allocator-one/rcl`); it does not apply a shrinkwrap when
+the spec is a local tarball file, so such an installer has to extract the
+tarball and run `npm install --omit=dev --ignore-scripts` in it (`npm ci` refuses,
+because the shrinkwrap leaves out the devDependencies `package.json` lists).
+
 The workflow accepts stable annotated tags only when their commit is on
 `main` and the tag matches `package.json`. A tokenless job reruns lint, build,
 and tests and creates the package tarball. A separate minimal job receives only
