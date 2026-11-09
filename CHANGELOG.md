@@ -2,17 +2,16 @@
 
 ## Unreleased
 
-- Read the org-scoped login harness-cli writes, so evidence delivery and model
-  key fetches stop using a stale legacy token (RCL-211, RCL-212). harness-cli
-  1.16+ stores `harness login` in `credentials-org-<hash>.json` next to
-  `credentials.json` and leaves the legacy file as it was; once that token
-  expired, every evidence upload and `rcl evidence status` failed with HTTP 401
-  although `harness whoami` passed and logging in again changed nothing. In a
-  repository whose `.harness-cli/config.json` names an `org`, rcl now reads that
-  org's file first, under the repository's `url` when `harness login` approved
-  that host, then the host of the legacy login, then the default host, and falls
-  back to `credentials.json` as before. A repository `url` the user never
-  approved is still never used to choose a host.
+## 4.5.29 - 2026-11-09
+
+- Continue a guarded review on a changed head without `--retry-reason` when
+  the previous round reached its blocking quorum and was admitted, even though
+  one seat errored or returned `parse_failed` (RCL-205). Such a launch records
+  `hardFailure`, and the guard refused the next head with
+  `infrastructure_failure` although the quorum had already absorbed the
+  failed seat. Inconclusive or unadmitted launches still need the bounded
+  retry reason or their existing admission and stale paths, and admitted
+  inputs still refuse re-review.
 
 ## 4.5.28 - 2026-11-09
 

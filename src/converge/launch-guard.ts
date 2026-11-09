@@ -251,8 +251,9 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   const healthy = retryProof ? hasSuccessfulQuorum(retryProof.binding.reviewerHealth.policy,
     retryProof.binding.reviewerHealth.successfulSeats) : hasHealthyGuardedLaunch(previous);
+  const admitted = state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId);
   let disposed = terminalRejected;
-  if (healthy && !terminalRejected && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
+  if (healthy && !terminalRejected && !admitted) {
     const candidates = (state.staleReportAudit ?? []).filter(e => staleManifest(e).attempt === previous.attempt);
     const entry = candidates.find(e => {
       const m = staleManifest(e);
@@ -301,7 +302,10 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   if (healthy && !disposed && (resolution?.gatingFixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
     refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
   }
-  if ((previous.hardFailure || !healthy) && !options.retryReason) {
+  // A seat that errored or failed to parse inside a conclusive, admitted round
+  // is already accounted for by the quorum; only an unhealthy or unadmitted
+  // hard failure is an infrastructure failure of the launch (RCL-205).
+  if ((!healthy || (previous.hardFailure && !admitted)) && !options.retryReason) {
     refuse('infrastructure_failure', 'A head change cannot cure the previous infrastructure failure; supply an explicit bounded retry reason after recovery.');
   }
   if (!healthy && !previous.reviewerHealth && !retryProof) {
