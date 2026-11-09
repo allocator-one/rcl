@@ -307,7 +307,7 @@ describe('bound legacy launch health recovery', () => {
       report.run!.rcl_version = 'toString';
     });
     const before = await f.bytes();
-    await expect(guardReviewLaunch(f.retry)).rejects.toThrow('retry_report_invalid');
+    await expect(guardReviewLaunch(f.retry)).rejects.toThrow(/^retry_report_invalid: .*\(retry_report_binding_mismatch\)\.$/);
     expect(f.run).not.toHaveBeenCalled();
     expect(await f.bytes()).toEqual(before);
   });

@@ -12,6 +12,16 @@
   org's file first, under the host of the legacy login and then the default host,
   and falls back to `credentials.json` as before. The repository's `url` is
   still never used to choose a host.
+- Name the supported retry when `--retry-report` is given an inconclusive
+  launch that recorded its own blocking health (RCL-202). Since 4.2.0 a
+  completed launch stores its blocking seats natively, so the bounded retry
+  needs only `--retry-reason`; `--retry-report` proves health only for
+  4.1.10–4.1.12 aggregate-only launches. Such a launch was refused with the
+  generic `retry_report_invalid`, which read as a broken report. It now
+  refuses with `retry_report_current_health`, naming the recorded seats and
+  the `--retry-reason` path, before any claim. Other `retry_report_invalid`
+  refusals name the failed invariant, such as
+  `retry_report_binding_mismatch`. The legacy proof itself is unchanged.
 
 ## 4.5.27 - 2026-11-09
 
