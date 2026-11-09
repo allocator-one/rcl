@@ -18,6 +18,7 @@ import { readdir, readFile, writeFile } from 'fs/promises';
 import { hostname } from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
+import { installHttp1Transport } from './dispatch/http1-transport.js';
 import { loadConfig } from './config/loader.js';
 import { applyHarnessModelKeys } from './config/harness.js';
 import {
@@ -3589,4 +3590,5 @@ async function runPlanReview(
   }
 }
 
+installHttp1Transport();
 program.parse();

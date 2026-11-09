@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Pin provider calls to HTTP/1.1 so concurrent reviewer calls stop failing under
+  Node 26 (RCL-213). Node 26's built-in `fetch` negotiates HTTP/2 and sends every
+  parallel call to a provider over one connection; when that connection reset,
+  the whole batch failed together (`Connection error.`, `terminated`,
+  `BAD_RECORD_MAC`) and multi-reviewer rounds ended inconclusive. `rcl` now
+  installs an `undici` dispatcher with HTTP/2 off at startup, so each call has
+  its own socket, as it did under Node 24. Lowering `concurrency` or running
+  Node 24 is no longer needed. With Node's environment proxy enabled (`NODE_USE_ENV_PROXY=1` or `--use-env-proxy`) the dispatcher keeps
+  honouring `HTTPS_PROXY`/`NO_PROXY`. A global dispatcher already set by a `--import`
+  preload (for example one that raises undici's headers timeout) is left in place.
+  Adds `undici` as a dependency.
 - Report a converge round that stopped without a report instead of leaving
   callers to wait on it. A forked converge worker that returned while its
   council ran in the background took the council with it, and two lanes then
