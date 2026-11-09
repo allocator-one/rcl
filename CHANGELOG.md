@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Report a converge round that stopped without a report instead of leaving
+  callers to wait on it. A forked converge worker that returned while its
+  council ran in the background took the council with it, and two lanes then
+  waited about an hour on a round nothing would finish. New
+  `rcl converge-status --target <t> [--head <sha>]` reads native state
+  without changing it and reports `running` (a review process holds the
+  target), `dead` (the pending launch's process is gone), `not_launched`,
+  `completed` or `failed`, exiting 6 when the round is abandoned; `--wait`
+  polls until the round finishes or dies. The converge skill now tells a
+  worker never to return while its council runs and to check this command
+  whenever a round's progress is in doubt (RCL-232).
+
 ## 4.5.26 - 2026-11-09
 
 - Re-dispatch a timed-out blocking call once inside a guarded council. A
