@@ -167,7 +167,7 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   knownKeys(report, ['run','reviews','findings','belowThresholdFindings','stats'], 'report');
   knownKeys(report.run, ['id','rcl_version','command','target','roster','config_sha256','thresholds','gating','spec','context_files','plan','runner','started_at','finished_at','duration_ms','ci_exit_code','converge','provenance'], 'header');
   knownKeys(report.run.runner, ['kind','agent','host','ci_run_id'], 'runner');
-  knownKeys(report.run.target, ['kind','repo','pr_number','url','head_sha','base_sha','head_ref','base_ref','diff_sha256','files','additions','deletions'], 'target');
+  knownKeys(report.run.target, ['kind','repo','pr_number','url','head_sha','base_sha','head_ref','base_ref','diff_sha256','left_out','files','additions','deletions'], 'target');
   if (report.run.converge) {
     knownKeys(report.run.converge, ['target','round','attempt','recovery_source'], 'converge');
     if (Object.hasOwn(report.run.converge, 'recovery_source') &&

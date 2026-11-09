@@ -2,6 +2,7 @@ import type { Octokit, RestEndpointMethodTypes } from '@octokit/rest';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
 import { createGitHubClient, getGitHubPullRequest } from './github-client.js';
+import { generatedPathMatcher, leaveOutGenerated } from './generated-paths.js';
 
 export interface GitHubTarget {
   owner: string;
@@ -164,6 +165,39 @@ async function fetchChangedFiles(
   return { files: listed, ...(mergeBaseSha ? { mergeBaseSha } : {}) };
 }
 
+// A root .gitattributes is a few lines; a megabyte of one is not a policy
+// file, and reading it whole would only hide a problem.
+const MAX_ATTRIBUTES_BYTES = 1024 * 1024;
+
+/**
+ * The repository-root `.gitattributes` at one commit, or `undefined` when the
+ * commit has none. Any other failure propagates: a review that silently fell
+ * back to "nothing is generated" would read a different patch, and bind a
+ * different digest, than the same review on a healthy API.
+ */
+async function readRootAttributes(octokit: Octokit, target: GitHubTarget, ref: string): Promise<string | undefined> {
+  try {
+    const { data } = await octokit.repos.getContent({
+      owner: target.owner,
+      repo: target.repo,
+      path: '.gitattributes',
+      ref,
+      mediaType: { format: 'raw' },
+    });
+    const text = typeof data === 'string' ? data : undefined;
+    if (text === undefined) {
+      throw new Error(`.gitattributes at ${ref} is not a regular file.`);
+    }
+    if (Buffer.byteLength(text, 'utf8') > MAX_ATTRIBUTES_BYTES) {
+      throw new Error(`.gitattributes at ${ref} exceeds ${MAX_ATTRIBUTES_BYTES.toLocaleString('en-US')} bytes.`);
+    }
+    return text;
+  } catch (err) {
+    if ((err as { status?: number }).status === 404) return undefined;
+    throw err;
+  }
+}
+
 export async function fetchPRDiff(
   target: GitHubTarget,
   token?: string,
@@ -196,7 +230,7 @@ export async function fetchPRDiff(
     draft: pr.draft ?? false,
   };
 
-  const fileChanges: FileChange[] = files.map((f) => ({
+  const changes: FileChange[] = files.map((f) => ({
     filename: f.filename,
     status: f.status as FileChange['status'],
     additions: f.additions,
@@ -207,9 +241,21 @@ export async function fetchPRDiff(
     ...(f.sha ? { blobSha: f.sha } : {}),
   }));
 
+  // Generated paths the base commit declares are left out of the reviewed
+  // patch. The base — never the head — is the authority: a PR cannot switch
+  // review off for its own files by editing .gitattributes, and that edit is
+  // itself reviewed.
+  // Only a file that still carries a patch can be left out, so a diff without one needs no lookup.
+  const attributes = changes.some((f) => f.patch.length > 0)
+    ? await readRootAttributes(octokit, target, pr.base.sha)
+    : undefined;
+  const { files: fileChanges, leftOut } = attributes === undefined
+    ? { files: changes, leftOut: undefined }
+    : leaveOutGenerated(changes, generatedPathMatcher(attributes), pr.base.sha);
+
   return {
     files: fileChanges,
-    metadata,
+    metadata: leftOut ? { ...metadata, leftOut } : metadata,
     source: 'github',
   };
 }

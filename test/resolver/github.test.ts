@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Octokit } from '@octokit/rest';
 import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from '../../src/resolver/github.js';
+import { chunkDiff } from '../../src/prepare/chunker.js';
+import { resolveReviewTarget } from '../../src/resolver/target.js';
+import { buildRunHeader, diffDigest } from '../../src/report/run-header.js';
 
 function fakePr(changedFiles = 3) {
   return {
@@ -32,17 +35,23 @@ function changedFile(i: number) {
 const files = (n: number) => Array.from({ length: n }, (_, i) => changedFile(i));
 
 /** An Octokit fake: compare serves `compareFiles` on one response; the PR listing serves `listed`. */
-function octokitWith(opts: { pr?: ReturnType<typeof fakePr>; recheck?: ReturnType<typeof fakePr>; compareFiles?: number; listed?: number }) {
+function octokitWith(opts: { pr?: ReturnType<typeof fakePr>; recheck?: ReturnType<typeof fakePr>; compareFiles?: number; listed?: number; attributes?: string; getContentError?: unknown }) {
   const pr = opts.pr ?? fakePr();
   const get = vi.fn().mockResolvedValueOnce(pr).mockResolvedValueOnce(opts.recheck ?? pr);
   const compare = vi.fn(async () => ({ data: { files: files(opts.compareFiles ?? pr.data.changed_files) } }));
   const paginate = vi.fn(async () => files(opts.listed ?? pr.data.changed_files));
+  // Without attributes the base has no .gitattributes, which GitHub reports as a 404.
+  const getContent = vi.fn(async () => {
+    if (opts.getContentError) throw opts.getContentError;
+    if (opts.attributes === undefined) throw Object.assign(new Error('Not Found'), { status: 404 });
+    return { data: opts.attributes };
+  });
   const octokit = {
     pulls: { get, listFiles: { endpoint: 'pulls.listFiles' } },
-    repos: { compareCommitsWithBasehead: compare },
+    repos: { compareCommitsWithBasehead: compare, getContent },
     paginate,
   } as unknown as Octokit;
-  return { octokit, get, compare, paginate };
+  return { octokit, get, compare, paginate, getContent };
 }
 
 describe('parseGitHubTarget', () => {
@@ -234,5 +243,77 @@ describe('retained PR effective merge-base binding', () => {
     const f = strictFixture(301); f.compare.mockResolvedValue({ data: { files: files(300), merge_base_commit: { sha: 'c'.repeat(40) } } } as any);
     const diff = await fetchPRDiff(target, undefined, f.octokit, { requireMergeBase: true });
     expect(diff.files).toHaveLength(301); expect(diff.metadata?.mergeBaseSha).toBe('c'.repeat(40)); expect(f.paginate).toHaveBeenCalledOnce();
+  });
+});
+
+describe('generated paths declared by the base .gitattributes (RCL-209)', () => {
+  const target = { owner: 'o', repo: 'r', number: 1 };
+  const base = 'a'.repeat(40);
+  const head = 'b'.repeat(40);
+  const attributes = 'spec/infraone.json linguist-generated\ndocs/infraone/** linguist-generated\n';
+  // The served-spec shape: one generated file alone is over the 64,000-line patch cap.
+  const hugePatch = `@@ -1 +1,70000 @@\n-x\n${Array.from({ length: 70_000 }, (_, i) => `+line ${i}`).join('\n')}\n`;
+
+  function release(blobSha: string, extra: { attributes?: string; getContentError?: unknown } = {}) {
+    const pr = fakePr(2); pr.data.base.sha = base; pr.data.head.sha = head;
+    const f = octokitWith({ pr, attributes: extra.attributes, getContentError: extra.getContentError });
+    f.compare.mockResolvedValue({ data: { files: [
+      changedFile(1),
+      { filename: 'spec/infraone.json', status: 'modified', additions: 70_000, deletions: 1, patch: hugePatch, sha: blobSha },
+    ] } } as any);
+    return f;
+  }
+
+  it('reads the attributes at the base commit, never the head', async () => {
+    const f = release('1'.repeat(40), { attributes });
+    await fetchPRDiff(target, undefined, f.octokit);
+    expect(f.getContent).toHaveBeenCalledWith(expect.objectContaining({ path: '.gitattributes', ref: base }));
+  });
+
+  it('leaves the generated patch out so an over-cap PR can be chunked, and says so in the metadata', async () => {
+    const without = await fetchPRDiff(target, undefined, release('1'.repeat(40)).octokit);
+    expect(() => chunkDiff(without.files)).toThrow(/lossless safety capacity/);
+
+    const diff = await fetchPRDiff(target, undefined, release('1'.repeat(40), { attributes }).octokit);
+    const chunks = chunkDiff(diff.files);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]!.files.find((f) => f.filename === 'spec/infraone.json')?.patch).toBe('');
+    expect(chunks[0]!.files.find((f) => f.filename === 'src/file-1.ts')?.patch).toContain('+new-1');
+    expect(diff.metadata?.leftOut).toEqual({ reason: 'linguist-generated', ref: base, count: 1, paths: ['spec/infraone.json'] });
+  });
+
+  it('keeps the evidence bound to the full head: the digest moves with the generated content', async () => {
+    const attributesOpt = { attributes };
+    const one = await fetchPRDiff(target, undefined, release('1'.repeat(40), attributesOpt).octokit);
+    const same = await fetchPRDiff(target, undefined, release('1'.repeat(40), attributesOpt).octokit);
+    const other = await fetchPRDiff(target, undefined, release('2'.repeat(40), attributesOpt).octokit);
+    expect(diffDigest(same.files)).toBe(diffDigest(one.files));
+    expect(diffDigest(other.files)).not.toBe(diffDigest(one.files));
+  });
+
+  it('records the left-out paths in the run header target', async () => {
+    const diff = await fetchPRDiff(target, undefined, release('1'.repeat(40), { attributes }).octokit);
+    const runTarget = await resolveReviewTarget(diff, undefined, {});
+    expect(runTarget.leftOut).toEqual(diff.metadata?.leftOut);
+    const header = buildRunHeader({
+      rclVersion: 'test', command: 'review', target: runTarget, diff, roster: [], config: {} as any,
+      thresholds: { minConsensusScore: 0, minConfidence: 0, dedupeLineWindow: 0, jaccardThreshold: 0 },
+      gating: { mode: 'severity', minModels: 1 } as any, runner: { kind: 'human' },
+      startedAt: new Date(0), finishedAt: new Date(0), ciExitCode: 0,
+    } as any);
+    expect(header.target.left_out).toEqual({ reason: 'linguist-generated', ref: base, count: 1, paths: ['spec/infraone.json'] });
+  });
+
+  it('does not let the PR declare its own files generated: a head-only .gitattributes changes nothing', async () => {
+    // The base has no .gitattributes (404); the PR adds one. Only the base is read.
+    const f = release('1'.repeat(40));
+    const diff = await fetchPRDiff(target, undefined, f.octokit);
+    expect(diff.metadata?.leftOut).toBeUndefined();
+    expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toBe(hugePatch);
+  });
+
+  it('fails the review when the attributes cannot be read, rather than reviewing a different patch', async () => {
+    const f = release('1'.repeat(40), { getContentError: Object.assign(new Error('rate limited'), { status: 403 }) });
+    await expect(fetchPRDiff(target, undefined, f.octokit)).rejects.toThrow('rate limited');
   });
 });

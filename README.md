@@ -167,6 +167,22 @@ Review a PR, a local diff, or uncommitted work. Pick exactly one source:
 
 Untracked files are invisible to `git diff` and therefore not reviewed.
 
+**Generated files in a PR.** A PR whose diff is mostly a generated, served
+artifact (a bundled OpenAPI spec, a lockfile, help text rendered from it) can
+exceed the 64,000-line patch cap. Mark such paths `linguist-generated` in the
+repository-root `.gitattributes` on the PR's **base** branch
+(`spec/infraone.json linguist-generated`) and `rcl review` leaves their patches
+out of what the council reads. Only the base commit's file counts, so a PR
+cannot hide its own files by editing `.gitattributes`; add the rule in an
+earlier PR. A left-out file stays in the diff by name, status, line counts and
+git blob id, so `diff_sha256` still changes with its content, and the report's
+`run.target.left_out` records the reason, the commit whose `.gitattributes`
+decided, the count and up to 100 paths. `.gitattributes` files themselves are
+always reviewed. Only the root file, plain patterns (`*`, `?`, `**`, `[…]`,
+anchored or by base name) and the set, `=true`, unset and `=false` forms are
+read; any other syntax leaves the file in review. PR targets only: patch files
+and `--staged`/`--working-tree` carry no base to read from.
+
 | Flag | Description |
 | --- | --- |
 | `--staged` / `--working-tree` | Review uncommitted changes instead of a target |
