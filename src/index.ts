@@ -1318,7 +1318,12 @@ telemetry
       level: runtime.level,
       repoManaged: runtime.repoManaged,
       credential: runtime.credential
-        ? { source: runtime.credential.source, host: credentialHost(runtime.credential) }
+        ? {
+            source: runtime.credential.source,
+            host: credentialHost(runtime.credential),
+            file: runtime.credentialOrigin?.file ?? null,
+            reason: runtime.credentialOrigin?.reason ?? null,
+          }
         : null,
       note: runtime.note ?? null,
       outbox: { dir: runtime.outbox.dir, entries, pendingLoss: loss, refusedLoss: refused },
@@ -1338,6 +1343,8 @@ telemetry
         ? `Credential: ${status.credential.source} → ${status.credential.host}`
         : `Credential: none${status.note ? ` (${status.note})` : ''}`
     );
+    if (status.credential?.file) console.log(`  File: ${status.credential.file}`);
+    if (status.credential?.reason) console.log(`  Why: ${status.credential.reason}`);
     console.log(`Outbox: ${runtime.outbox.dir} — ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`);
     for (const entry of entries) {
       console.log(
