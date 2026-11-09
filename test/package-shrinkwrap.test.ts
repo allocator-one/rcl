@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -60,6 +60,7 @@ describe('published package pins its dependencies (RCL-208)', () => {
 });
 
 describe('buildShrinkwrap', () => {
+  const pkg = { name: 'x', version: '1.0.0', dependencies: { a: '^1' } };
   const lock = {
     name: 'x', version: '1.0.0', lockfileVersion: 3, requires: true,
     packages: {
@@ -71,7 +72,7 @@ describe('buildShrinkwrap', () => {
   };
 
   it('keeps what the dependencies reach and drops dev and devOptional packages', () => {
-    const result = buildShrinkwrap(lock, { name: 'x', version: '1.0.0' });
+    const result = buildShrinkwrap(lock, pkg);
     expect(Object.keys(result.packages)).toEqual(['', 'node_modules/a']);
     expect(result.packages[''].devDependencies).toBeUndefined();
   });
@@ -79,10 +80,51 @@ describe('buildShrinkwrap', () => {
   it('refuses a production package that is not pinned by URL and hash', () => {
     const unpinned = structuredClone(lock);
     delete (unpinned.packages['node_modules/a'] as Record<string, unknown>).integrity;
-    expect(() => buildShrinkwrap(unpinned, { name: 'x', version: '1.0.0' })).toThrow(/node_modules\/a/);
+    expect(() => buildShrinkwrap(unpinned, pkg)).toThrow(/node_modules\/a/);
   });
 
   it('refuses a lockfile that no longer matches the package version', () => {
-    expect(() => buildShrinkwrap(lock, { name: 'x', version: '1.0.1' })).toThrow(/out of date/);
+    expect(() => buildShrinkwrap(lock, { ...pkg, version: '1.0.1' })).toThrow(/out of date/);
+  });
+
+  it.each([
+    ['an optional dependency added to package.json', { optionalDependencies: { d: '^1' } }],
+    ['a peer dependency added to package.json', { peerDependencies: { d: '^1' } }],
+    ['a dependency whose range changed', { dependencies: { a: '^2' } }],
+    ['a dependency removed from package.json', { dependencies: {} }],
+  ])('refuses a lockfile that is stale for %s, which would publish it unpinned', (_label, change) => {
+    expect(() => buildShrinkwrap(lock, { ...pkg, ...change })).toThrow(/out of date/);
+  });
+});
+
+describe('build-shrinkwrap script as run by prepack', () => {
+  const scripts = new URL('../scripts/', import.meta.url);
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'rcl-208-script-'));
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  // prepack exits 0 whether or not the script wrote the file, so a skipped run would publish unpinned.
+  function checkout(name: string) {
+    const root = join(dir, name);
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    for (const file of ['package.json', 'package-lock.json']) copyFileSync(new URL(`../${file}`, scripts), join(root, file));
+    copyFileSync(new URL('build-shrinkwrap.mjs', scripts), join(root, 'scripts', 'build-shrinkwrap.mjs'));
+    return root;
+  }
+
+  it('writes the shrinkwrap from a checkout path with a space and non-ASCII characters', () => {
+    const root = checkout('re po é');
+    execFileSync(process.execPath, [join(root, 'scripts', 'build-shrinkwrap.mjs')]);
+    expect(existsSync(join(root, 'npm-shrinkwrap.json'))).toBe(true);
+  });
+
+  it('writes the shrinkwrap when the checkout is reached through a symlink', () => {
+    const root = checkout('real');
+    const link = join(dir, 'link');
+    symlinkSync(root, link);
+    execFileSync(process.execPath, [join(link, 'scripts', 'build-shrinkwrap.mjs')]);
+    expect(existsSync(join(root, 'npm-shrinkwrap.json'))).toBe(true);
   });
 });

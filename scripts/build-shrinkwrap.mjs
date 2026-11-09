@@ -4,7 +4,8 @@
 // every install of rcl fetch vitest, typescript and the rest of the build tools.
 // Run by the `prepack` script and removed again by `postpack`, so the working
 // tree keeps package-lock.json as its only lockfile for `npm ci`.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 /** The package a dependency name resolves to from `from`, searching up through node_modules like npm does. */
 function resolve(packages, from, name) {
@@ -30,6 +31,14 @@ export function buildShrinkwrap(lock, pkg) {
     throw new Error('package-lock.json is out of date: run npm install to sync name and version with package.json');
   }
   const { packages } = lock;
+  // The tree below is walked from the lockfile's own root entry, so a dependency package.json gained since
+  // the lockfile was written would be left out of the shrinkwrap without any error.
+  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+    const sorted = (deps) => JSON.stringify(Object.entries(deps ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+    if (sorted(packages['']?.[field]) !== sorted(pkg[field])) {
+      throw new Error(`package-lock.json is out of date: its ${field} differ from package.json; run npm install`);
+    }
+  }
   const keep = new Set(['']);
   const queue = [''];
   while (queue.length > 0) {
@@ -71,7 +80,9 @@ export function buildShrinkwrap(lock, pkg) {
   return { ...lock, packages: pruned };
 }
 
-if (process.argv[1] === new URL(import.meta.url).pathname) {
+// Compare real paths: a URL pathname is percent-encoded, and argv[1] is not resolved through symlinks. A
+// mismatch would skip the write, and prepack would still succeed and pack a tarball without the shrinkwrap.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const read = (name) => JSON.parse(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'));
   const shrinkwrap = buildShrinkwrap(read('package-lock.json'), read('package.json'));
   writeFileSync(new URL('../npm-shrinkwrap.json', import.meta.url), `${JSON.stringify(shrinkwrap, null, 2)}\n`);
