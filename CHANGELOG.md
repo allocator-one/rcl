@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Pin provider calls to HTTP/1.1 so concurrent reviewer calls stop failing under
+  Node 26 (RCL-213). Node 26's built-in `fetch` negotiates HTTP/2 and sends every
+  parallel call to a provider over one connection; when that connection reset,
+  the whole batch failed together (`Connection error.`, `terminated`,
+  `BAD_RECORD_MAC`) and multi-reviewer rounds ended inconclusive. `rcl` now
+  installs an `undici` dispatcher with HTTP/2 off at startup, so each call has
+  its own socket, as it did under Node 24. Lowering `concurrency` or running
+  Node 24 is no longer needed. Adds `undici` as a dependency.
+
 ## 4.5.26 - 2026-11-09
 
 - Re-dispatch a timed-out blocking call once inside a guarded council. A
