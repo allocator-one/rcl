@@ -82,6 +82,12 @@ describe('harness-cli credential layouts', () => {
     expect((await resolve()).credential).toEqual({ url: custom, token: 'aone_custom_host', source: 'login' });
   });
 
+  it('never moves a custom-host login to the default host', async () => {
+    await write(legacyPath, 'https://harness.example.test', 'aone_custom_legacy');
+    await writeOrg(ORG, HOST, HOST, 'aone_default_host');
+    expect((await resolve()).credential).toMatchObject({ url: 'https://harness.example.test', token: 'aone_custom_legacy' });
+  });
+
   it('never reads the login of another org', async () => {
     await write(legacyPath, HOST, 'aone_legacy');
     await writeOrg(OTHER_ORG, HOST, HOST, 'aone_other_org');

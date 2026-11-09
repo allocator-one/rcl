@@ -167,9 +167,10 @@ export interface LoginOptions {
  *
  * The file name depends on the host, so the hosts tried are, in order: the
  * repository's `url` when the user approved that host (it is in
- * `trusted-hosts.json`), the legacy login's host, and the default host. An
- * unapproved `url` from a cloned repository is never used, so it cannot steer
- * which host a stored token is read for.
+ * `trusted-hosts.json`) and the legacy login's host; only when neither exists
+ * is the default host tried, so a login never moves to a host the user did not
+ * name. An unapproved `url` from a cloned repository is never used, so it
+ * cannot steer which host a stored token is read for.
  */
 export async function readLoginCredential(options: LoginOptions): Promise<{ url: string; token: string } | null> {
   const legacyPath = options.credentialsPath ?? defaultCredentialsPath(options.env);
@@ -177,7 +178,9 @@ export async function readLoginCredential(options: LoginOptions): Promise<{ url:
   const { org, url } = await readRepoLoginHints(options.cwd);
   if (org !== null) {
     const approved = url !== null && (await readTrustedHosts(legacyPath)).includes(url) ? [url] : [];
-    for (const host of new Set([...approved, ...(legacy === null ? [] : [legacy.url]), DEFAULT_HARNESS_URL])) {
+    // A host the user already named keeps the credential on that host; the default is only a last resort.
+    const known = [...approved, ...(legacy === null ? [] : [legacy.url])];
+    for (const host of new Set(known.length > 0 ? known : [DEFAULT_HARNESS_URL])) {
       let path: string;
       try { path = orgCredentialsPath(legacyPath, host, org); } catch { continue; }
       const scoped = await readStoredCredentials(path);
