@@ -1,4 +1,4 @@
-import { Agent, setGlobalDispatcher, type buildConnector } from 'undici';
+import { Agent, EnvHttpProxyAgent, setGlobalDispatcher, type buildConnector, type Dispatcher } from 'undici';
 
 /**
  * Pin every `fetch` in this process, which carries all provider SDK traffic,
@@ -13,8 +13,20 @@ import { Agent, setGlobalDispatcher, type buildConnector } from 'undici';
  * The dispatcher comes from the `undici` package, not Node's bundled copy.
  * Its `Agent` works with the built-in `fetch` on Node 22, 24 and 26.
  */
-export function installHttp1Transport(options: { connect?: buildConnector.BuildOptions } = {}): Agent {
-  const agent = new Agent({ allowH2: false, ...options });
+export function installHttp1Transport(options: { connect?: buildConnector.BuildOptions } = {}): Dispatcher {
+  const agent = envProxyEnabled()
+    ? new EnvHttpProxyAgent({ allowH2: false, ...options, requestTls: options.connect })
+    : new Agent({ allowH2: false, ...options });
   setGlobalDispatcher(agent);
   return agent;
+}
+
+/**
+ * Node's `NODE_USE_ENV_PROXY=1` (or `--use-env-proxy`) makes the built-in `fetch`
+ * honour HTTP_PROXY, HTTPS_PROXY and NO_PROXY by installing its own global
+ * dispatcher. Replacing it with a plain `Agent` would send provider calls direct,
+ * so keep the proxy-aware dispatcher in that case and only turn HTTP/2 off.
+ */
+function envProxyEnabled(): boolean {
+  return process.env.NODE_USE_ENV_PROXY === '1' || process.execArgv.includes('--use-env-proxy');
 }

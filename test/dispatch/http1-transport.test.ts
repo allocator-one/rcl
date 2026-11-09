@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
+import http from 'node:http';
 import http2 from 'node:http2';
-import type { AddressInfo, Socket } from 'node:net';
+import net, { type AddressInfo, type Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI } from '@google/genai';
 import { Agent, getGlobalDispatcher, setGlobalDispatcher } from 'undici';
@@ -39,7 +40,7 @@ beforeAll(async () => {
     }, 150);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  baseUrl = `https://localhost:${(server.address() as AddressInfo).port}`;
+  baseUrl = `https://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
 afterAll(async () => {
@@ -101,6 +102,64 @@ describe('provider transport under concurrency (RCL-213)', () => {
     await concurrently(call);
     expect(protocols).toHaveLength(CALLS);
     expect(new Set(protocols)).toEqual(new Set(['http/1.1']));
+  });
+});
+
+describe('environment proxy (RCL-213)', () => {
+  let proxy: http.Server;
+  let proxyUrl: string;
+  let connects: string[] = [];
+
+  beforeAll(async () => {
+    proxy = http.createServer();
+    proxy.on('connect', (req, clientSocket, head) => {
+      connects.push(req.url ?? '');
+      const [host, port] = (req.url ?? '').split(':');
+      const upstream = net.connect(Number(port), host, () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        upstream.write(head);
+        upstream.pipe(clientSocket);
+        clientSocket.pipe(upstream);
+      });
+      upstream.on('error', () => clientSocket.destroy());
+      clientSocket.on('error', () => upstream.destroy());
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+    proxyUrl = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    proxy.closeAllConnections();
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+  });
+
+  afterEach(() => {
+    connects = [];
+  });
+
+  // Node's NODE_USE_ENV_PROXY=1 makes the built-in fetch route through HTTPS_PROXY by installing its own
+  // global dispatcher; replacing that dispatcher must not silently send provider calls direct.
+  it('keeps routing through HTTPS_PROXY when Node was started with NODE_USE_ENV_PROXY=1', async () => {
+    vi.stubEnv('NODE_USE_ENV_PROXY', '1');
+    vi.stubEnv('HTTPS_PROXY', proxyUrl);
+    vi.stubEnv('https_proxy', proxyUrl);
+    vi.stubEnv('NO_PROXY', '');
+    vi.stubEnv('no_proxy', '');
+    installHttp1Transport({ connect });
+    protocols = [];
+    const response = await fetch(baseUrl, { method: 'POST', body: '{}' });
+    expect(response.status).toBe(400);
+    expect(connects).toEqual([new URL(baseUrl).host]);
+    expect(protocols).toEqual(['http/1.1']);
+  });
+
+  it('connects directly when the environment proxy is not enabled', async () => {
+    vi.stubEnv('NODE_USE_ENV_PROXY', '');
+    vi.stubEnv('HTTPS_PROXY', proxyUrl);
+    vi.stubEnv('https_proxy', proxyUrl);
+    installHttp1Transport({ connect });
+    await fetch(baseUrl, { method: 'POST', body: '{}' });
+    expect(connects).toEqual([]);
   });
 });
 
