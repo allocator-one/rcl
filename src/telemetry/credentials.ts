@@ -1,7 +1,6 @@
 import {
-  defaultCredentialsPath,
   findHarnessRepoConfig,
-  readStoredCredentials,
+  readLoginCredential,
 } from '../config/harness.js';
 
 /**
@@ -104,7 +103,8 @@ export async function resolveHarnessCredential(
     return { repoManaged, credential: { url, token: envToken, source: 'env' } };
   }
 
-  const stored = await readStoredCredentials(options.credentialsPath ?? defaultCredentialsPath(env));
+  const stored = await readLoginCredential({ env, cwd: options.cwd ?? process.cwd(),
+    ...(options.credentialsPath !== undefined ? { credentialsPath: options.credentialsPath } : {}) });
   if (stored === null) {
     return {
       repoManaged,
