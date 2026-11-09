@@ -664,6 +664,7 @@ strict severity gating for the round.
 | `GITHUB_TOKEN` | GitHub token for PR fetch and `--post` |
 | `XDG_CONFIG_HOME` | Where the `harness login` credential is read from (`$XDG_CONFIG_HOME/harness/credentials.json`; default `~/.config/harness/credentials.json`) |
 | `RCL_DATA_DIR` | Per-machine state directory (model stats, evidence outbox and quarantine); default `~/.rcl` |
+| `HOME` | Not required: `~` above falls back to the account's home in the password database |
 | `RCL_TELEMETRY` | `off` keeps every review on the machine |
 | `RCL_NO_HARNESS_KEYS` | Any value disables provider-key distribution via Harness |
 | `RCL_FOR_PR` | Same as `--for-pr`, for patch-file reviews |
