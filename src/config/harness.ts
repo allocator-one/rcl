@@ -153,15 +153,16 @@ export interface LoginOptions {
  * outside such a repository, the legacy file answers as before.
  *
  * Only the repository's `org` is read, never its `url`: the org file is looked
- * up under the default host and under the legacy login's host, so a cloned
- * repository cannot steer which host a stored token is sent to.
+ * up under the legacy login's host, which keeps the host that login chose,
+ * then under the default host, so a cloned repository cannot steer which host
+ * a stored token is sent to.
  */
 export async function readLoginCredential(options: LoginOptions): Promise<{ url: string; token: string } | null> {
   const legacyPath = options.credentialsPath ?? defaultCredentialsPath(options.env);
   const legacy = await readStoredCredentials(legacyPath);
   const org = await readRepoOrg(options.cwd);
   if (org !== null) {
-    for (const host of new Set([DEFAULT_HARNESS_URL, ...(legacy === null ? [] : [legacy.url])])) {
+    for (const host of new Set([...(legacy === null ? [] : [legacy.url]), DEFAULT_HARNESS_URL])) {
       let path: string;
       try { path = orgCredentialsPath(legacyPath, host, org); } catch { continue; }
       const scoped = await readStoredCredentials(path);
