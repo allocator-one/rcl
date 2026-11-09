@@ -109,13 +109,16 @@ describe('environment proxy (RCL-213)', () => {
   let proxy: http.Server;
   let proxyUrl: string;
   let connects: string[] = [];
+  const tunnels = new Set<Socket>();
 
   beforeAll(async () => {
     proxy = http.createServer();
     proxy.on('connect', (req, clientSocket, head) => {
       connects.push(req.url ?? '');
+      tunnels.add(clientSocket);
       const [host, port] = (req.url ?? '').split(':');
       const upstream = net.connect(Number(port), host, () => {
+        tunnels.add(upstream);
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         upstream.write(head);
         upstream.pipe(clientSocket);
@@ -129,6 +132,8 @@ describe('environment proxy (RCL-213)', () => {
   });
 
   afterAll(async () => {
+    // closeAllConnections() leaves upgraded CONNECT tunnels open, which would hold close() back.
+    for (const socket of tunnels) socket.destroy();
     proxy.closeAllConnections();
     await new Promise<void>((resolve) => proxy.close(() => resolve()));
   });
@@ -151,6 +156,18 @@ describe('environment proxy (RCL-213)', () => {
     expect(response.status).toBe(400);
     expect(connects).toEqual([new URL(baseUrl).host]);
     expect(protocols).toEqual(['http/1.1']);
+  });
+
+  it('keeps routing through HTTPS_PROXY when --use-env-proxy comes from NODE_OPTIONS', async () => {
+    vi.stubEnv('NODE_USE_ENV_PROXY', '');
+    vi.stubEnv('NODE_OPTIONS', '--max-old-space-size=4096 --use-env-proxy');
+    vi.stubEnv('HTTPS_PROXY', proxyUrl);
+    vi.stubEnv('https_proxy', proxyUrl);
+    vi.stubEnv('NO_PROXY', '');
+    vi.stubEnv('no_proxy', '');
+    installHttp1Transport({ connect });
+    await fetch(baseUrl, { method: 'POST', body: '{}' });
+    expect(connects).toEqual([new URL(baseUrl).host]);
   });
 
   it('connects directly when the environment proxy is not enabled', async () => {

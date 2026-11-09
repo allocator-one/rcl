@@ -9,7 +9,7 @@
   `BAD_RECORD_MAC`) and multi-reviewer rounds ended inconclusive. `rcl` now
   installs an `undici` dispatcher with HTTP/2 off at startup, so each call has
   its own socket, as it did under Node 24. Lowering `concurrency` or running
-  Node 24 is no longer needed. With `NODE_USE_ENV_PROXY=1` the dispatcher keeps
+  Node 24 is no longer needed. With Node's environment proxy enabled (`NODE_USE_ENV_PROXY=1` or `--use-env-proxy`) the dispatcher keeps
   honouring `HTTPS_PROXY`/`NO_PROXY`. Adds `undici` as a dependency.
 
 ## 4.5.26 - 2026-11-09

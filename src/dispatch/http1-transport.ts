@@ -28,5 +28,11 @@ export function installHttp1Transport(options: { connect?: buildConnector.BuildO
  * so keep the proxy-aware dispatcher in that case and only turn HTTP/2 off.
  */
 function envProxyEnabled(): boolean {
-  return process.env.NODE_USE_ENV_PROXY === '1' || process.execArgv.includes('--use-env-proxy');
+  // Options given through NODE_OPTIONS never appear in process.execArgv, so read both.
+  const nodeOptions = (process.env.NODE_OPTIONS ?? '').split(/\s+/);
+  return (
+    process.env.NODE_USE_ENV_PROXY === '1' ||
+    process.execArgv.includes('--use-env-proxy') ||
+    nodeOptions.includes('--use-env-proxy')
+  );
 }
