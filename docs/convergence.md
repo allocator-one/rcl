@@ -282,6 +282,13 @@ After a failed or unknown dispatch, or an inconclusive report, continue with the
 same guarded review command plus an explicit bounded `--retry-reason`. The
 retry spends one more attempt within the existing caps.
 
+A completed launch whose blocking health was conclusive is not an
+infrastructure failure, even when a seat errored or returned `parse_failed`
+and the launch recorded `hardFailure`: the quorum already accounts for that
+seat. Once the report is admitted, continue on a changed head without
+`--retry-reason`, exactly as after a fully healthy round. Before admission it
+still needs normal admission or the audited stale path.
+
 For a 4.1.10, 4.1.11 or 4.1.12 aggregate-only completion, retain the original
 report and config and add `--retry-report original-report.json` with an
 explicit bounded `--retry-reason` and a fresh `--json-file` destination. RCL

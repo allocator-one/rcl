@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 4.5.29 - 2026-11-09
+## 4.5.30 - 2026-11-09
 
 - Resume a checkpointed pending retry after its host dies even when the attempt
   cap is exhausted (RCL-214). `--resume-pending --preview-pending` authenticates
@@ -11,6 +11,17 @@
   limits; a missing journal refuses before state changes. If the terminal report
   was already retained, replay its exact bytes and reviewer artifact without
   rerunning reviewers or verification.
+
+## 4.5.29 - 2026-11-09
+
+- Continue a guarded review on a changed head without `--retry-reason` when
+  the previous round reached its blocking quorum and was admitted, even though
+  one seat errored or returned `parse_failed` (RCL-205). Such a launch records
+  `hardFailure`, and the guard refused the next head with
+  `infrastructure_failure` although the quorum had already absorbed the
+  failed seat. Inconclusive or unadmitted launches still need the bounded
+  retry reason or their existing admission and stale paths, and admitted
+  inputs still refuse re-review.
 
 ## 4.5.28 - 2026-11-09
 
