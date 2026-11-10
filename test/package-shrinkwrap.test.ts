@@ -57,6 +57,10 @@ describe('published package pins its dependencies (RCL-208)', () => {
     expect(existsSync(new URL('package-lock.json', root))).toBe(true);
     expect(existsSync(new URL('npm-shrinkwrap.json', root))).toBe(false);
   });
+
+  it('git-ignores the generated shrinkwrap, so a failed pack that skips postpack cannot be committed', () => {
+    expect(() => execFileSync('git', ['check-ignore', '--quiet', 'npm-shrinkwrap.json'], { cwd: root })).not.toThrow();
+  });
 });
 
 describe('buildShrinkwrap', () => {

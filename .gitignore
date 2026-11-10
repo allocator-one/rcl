@@ -1,6 +1,9 @@
 node_modules/
 dist/
 
+# Written by `npm pack` (prepack) and removed by postpack; a failed pack can leave it
+npm-shrinkwrap.json
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
