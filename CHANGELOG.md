@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 4.5.43 - 2026-11-10
+
+- Accept `comprehensive` for `rcl review-plan --focus` (RCL-55). `--help` named it
+  as the default, but the validator rejected it. It now runs the same unfocused
+  prompts as omitting the flag, and the error lists it with the other modes.
+
 ## 4.5.42 - 2026-11-10
 
 - Review direct OpenAI models at `high` reasoning effort (RCL-240). rcl sent no

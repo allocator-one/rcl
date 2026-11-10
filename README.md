@@ -343,7 +343,7 @@ before any code exists.
 
 ```bash
 rcl review-plan docs/plan.md
-rcl review-plan docs/plan.md --focus risks       # feasibility | completeness | risks | timeline
+rcl review-plan docs/plan.md --focus risks       # feasibility | completeness | risks | timeline | comprehensive (default)
 rcl review-plan docs/plan.md --spec PRD.md       # also check the plan against a spec
 ```
 
