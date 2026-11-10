@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 4.5.38 - 2026-11-10
+
+- Accept a group-writable recovery-lock ancestor when its group is the owner's
+  own user-private group (RCL-204). Ubuntu's umask 002 leaves the home
+  directory, checkout and `.git` at 775, and `rcl converge-stale --apply` refused
+  them with `unsafe_recovery_lock_ancestor`. The group counts as private only
+  when it is the owner's primary group and neither `/etc/group` nor
+  `/etc/passwd` shows another member; an unreadable account database, a shared
+  group, world-write and the 0700 lock root are refused as before. The error
+  now names the offending path, its owner and mode, and the fix.
+
 ## 4.5.37 - 2026-11-10
 
 - Report `launching` while an accepted convergence review prepares credentials,

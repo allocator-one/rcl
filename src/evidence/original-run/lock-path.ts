@@ -1,4 +1,4 @@
-import { lstat, mkdir } from 'node:fs/promises';
+import { lstat, mkdir, readFile } from 'node:fs/promises';
 import * as filesystem from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { platformPath } from '../../telemetry/recovery/files.js';
@@ -6,13 +6,40 @@ import { lockSystemCommand } from './lock-scope.js';
 
 interface DirectoryMetadata { uid: number; mode: number; isDirectory: () => boolean; isSymbolicLink: () => boolean }
 
-export function checkLockDirectory(info: DirectoryMetadata, uid: number, privateRoot: boolean): void {
+/**
+ * An ancestor may be group-writable only when the group is the owner's own
+ * user-private group (`privateGroup`, see isUserPrivateGroup): Ubuntu's umask
+ * 002 leaves checkouts at 775 with a group nobody else belongs to. World-write
+ * and the private root stay refused either way.
+ */
+export function checkLockDirectory(info: DirectoryMetadata, uid: number, privateRoot: boolean, privateGroup = false): void {
   const mode = info.mode & 0o7777;
+  const ownGroupWrite = privateGroup && info.uid === uid ? 0o020 : 0;
   if (!info.isDirectory() || info.isSymbolicLink() ||
       (privateRoot ? info.uid !== uid || mode !== 0o700 :
-        (info.uid !== 0 && info.uid !== uid) || ((mode & 0o022) !== 0 && !(info.uid === 0 && (mode & 0o1000) !== 0)))) {
+        (info.uid !== 0 && info.uid !== uid) || ((mode & 0o022 & ~ownGroupWrite) !== 0 && !(info.uid === 0 && (mode & 0o1000) !== 0)))) {
     throw new Error(privateRoot ? 'unsafe_recovery_lock_root' : 'unsafe_recovery_lock_ancestor');
   }
+}
+
+type AccountReader = (path: string) => Promise<string>;
+const accountRows = async (read: AccountReader, path: string): Promise<string[][]> =>
+  (await read(path)).split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(':'));
+
+/**
+ * True when `gid` is the primary group of `uid` and nobody else is in it, as
+ * with Debian/Ubuntu user-private groups. Reads only /etc/passwd and /etc/group
+ * and answers false when either is unreadable or does not show the owner.
+ */
+export async function isUserPrivateGroup(uid: number, gid: number, read: AccountReader = path => readFile(path, 'utf8')): Promise<boolean> {
+  try {
+    const passwd = await accountRows(read, '/etc/passwd'); const groups = await accountRows(read, '/etc/group');
+    const owner = passwd.find(row => row[2] === String(uid));
+    const matching = groups.filter(row => row[2] === String(gid));
+    return owner !== undefined && owner[3] === String(gid) && matching.length > 0 &&
+      passwd.every(row => row[3] !== String(gid) || row[2] === String(uid)) &&
+      matching.every(row => (row[3] ?? '').split(',').every(member => member === '' || member === owner[0]));
+  } catch { return false; }
 }
 
 /** Darwin ACL allow entries can grant access despite mode 0700. Deny-only ACLs are safe. */
@@ -78,7 +105,16 @@ async function recoveryDirectory(input: string, privateRoot: boolean, createMiss
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
       info = await lstat(current);
     }
-    checkLockDirectory(info, uid, privateRoot && current === path);
+    const groupWritable = !(privateRoot && current === path) && process.platform === 'linux' && info.uid === uid && (info.mode & 0o020) !== 0;
+    try { checkLockDirectory(info, uid, privateRoot && current === path, groupWritable && await isUserPrivateGroup(uid, info.gid)); }
+    catch (error) {
+      if ((error as Error).message === 'unsafe_recovery_lock_ancestor') {
+        const mode = (info.mode & 0o7777).toString(8);
+        throw new Error(`unsafe_recovery_lock_ancestor: ${current} is owned by uid ${info.uid} with mode ${mode}; ` +
+          'remove group and other write access (chmod go-w) or use a recovery directory under a directory only you can write');
+      }
+      throw error;
+    }
     if (process.platform === 'darwin') {
       checkDarwinLockACL(await lockSystemCommand('/bin/ls', ['-lde', current]));
     }

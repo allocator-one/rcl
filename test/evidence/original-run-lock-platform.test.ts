@@ -1,12 +1,12 @@
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
 import { localLockScope } from '../../src/evidence/original-run/lock-scope.js';
 import * as lockScope from '../../src/evidence/original-run/lock-scope.js';
-import { checkDarwinLockACL, checkDarwinLockMount, checkLinuxLockFilesystem, checkLockDirectory, inspectRecoveryDirectory } from '../../src/evidence/original-run/lock-path.js';
+import { checkDarwinLockACL, checkDarwinLockMount, checkLinuxLockFilesystem, checkLockDirectory, inspectRecoveryDirectory, isUserPrivateGroup } from '../../src/evidence/original-run/lock-path.js';
 import { withRecoveryLock } from '../../src/evidence/original-run/journal.js';
 import { platformPath } from '../../src/telemetry/recovery/files.js';
 
@@ -52,6 +52,56 @@ it.each([
 ])('checks directory ownership and modes: $uid/$mode/private=$private', item => {
   const check = () => checkLockDirectory({ ...item, isDirectory: () => true, isSymbolicLink: () => false }, 501, item.private);
   if (item.safe) expect(check).not.toThrow(); else expect(check).toThrow(/unsafe_recovery_lock_/);
+});
+
+it.each([
+  { uid: 501, mode: 0o775, privateGroup: true, safe: true },
+  { uid: 501, mode: 0o775, privateGroup: false, safe: false },
+  { uid: 501, mode: 0o777, privateGroup: true, safe: false },
+  { uid: 501, mode: 0o770, privateGroup: true, safe: true },
+  { uid: 999, mode: 0o775, privateGroup: true, safe: false },
+])('accepts a group-writable ancestor only in the owner private group: $uid/$mode/private=$privateGroup', item => {
+  const info = { uid: item.uid, mode: item.mode, isDirectory: () => true, isSymbolicLink: () => false };
+  const check = () => checkLockDirectory(info, 501, false, item.privateGroup);
+  if (item.safe) expect(check).not.toThrow(); else expect(check).toThrow('unsafe_recovery_lock_ancestor');
+});
+
+it('keeps the private lock root at 0700 even in a private group', () => {
+  const info = { uid: 501, mode: 0o770, isDirectory: () => true, isSymbolicLink: () => false };
+  expect(() => checkLockDirectory(info, 501, true, true)).toThrow('unsafe_recovery_lock_root');
+});
+
+const files = (passwd: string, group: string) => async (path: string) => {
+  if (path === '/etc/passwd') return passwd; if (path === '/etc/group') return group; throw new Error('ENOENT');
+};
+it.each([
+  { name: 'a user-private group without members', passwd: 'ann:x:1000:1000::/home/ann:/bin/sh', group: 'ann:x:1000:', safe: true },
+  { name: 'a group listing only the owner', passwd: 'ann:x:1000:1000::/home/ann:/bin/sh', group: 'ann:x:1000:ann', safe: true },
+  { name: 'a group with another listed member', passwd: 'ann:x:1000:1000::/h:/bin/sh', group: 'ann:x:1000:bob', safe: false },
+  { name: 'a group that is another user\'s primary group', passwd: 'ann:x:1000:1000::/h:/bin/sh\nbob:x:1001:1000::/h:/bin/sh', group: 'ann:x:1000:', safe: false },
+  { name: 'a group that is not the owner primary group', passwd: 'ann:x:1000:100::/h:/bin/sh', group: 'users:x:100:\nann:x:1000:', safe: false },
+  { name: 'a group missing from /etc/group', passwd: 'ann:x:1000:1000::/h:/bin/sh', group: '', safe: false },
+  { name: 'an owner missing from /etc/passwd', passwd: 'bob:x:1001:1001::/h:/bin/sh', group: 'ann:x:1000:', safe: false },
+])('classifies $name', async item => {
+  await expect(isUserPrivateGroup(1000, 1000, files(item.passwd, item.group))).resolves.toBe(item.safe);
+});
+
+it('fails closed when the account databases are unreadable', async () => {
+  await expect(isUserPrivateGroup(1000, 1000, files('', ''))).resolves.toBe(false);
+  await expect(isUserPrivateGroup(1000, 1000, async () => { throw new Error('EACCES'); })).resolves.toBe(false);
+});
+
+it.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('works under a group-writable ancestor owned by this user when the group is private', async () => {
+  const parent = await root(); await chmod(parent, 0o775); const work = vi.fn(async () => undefined);
+  const info = await stat(parent);
+  const outcome = withRecoveryLock(join(parent, 'child'), 'run', work);
+  if (await isUserPrivateGroup(info.uid, info.gid)) { await outcome; expect(work).toHaveBeenCalled(); }
+  else { await expect(outcome).rejects.toThrow('unsafe_recovery_lock_ancestor'); expect(work).not.toHaveBeenCalled(); }
+});
+
+it.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('names the offending path and the fix when an ancestor is group-writable for a shared group', async () => {
+  const parent = await root(); await chmod(parent, 0o777); const work = vi.fn();
+  await expect(withRecoveryLock(join(parent, 'child'), 'run', work)).rejects.toThrow(new RegExp(`unsafe_recovery_lock_ancestor.*${parent}.*chmod`));
 });
 
 it('refuses writable ancestors before creating a private child root', async () => {
