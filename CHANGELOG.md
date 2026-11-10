@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.37 - 2026-11-10
+
 - Report `launching` while an accepted convergence review prepares credentials,
   configuration and its diff, before the round registers (RCL-236). Native
   target ownership now covers that startup window, and `converge-status --wait`
