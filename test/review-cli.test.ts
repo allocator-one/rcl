@@ -220,6 +220,7 @@ describe('rcl review — exact base binding (RCL-210)', () => {
         globalThis.fetch = async (request, options) => {
           const url = new URL(typeof request === 'string' || request instanceof URL ? request : request.url);
           if (url.hostname === 'api.github.com') {
+            if (url.pathname.includes('/contents/')) return new Response('{"message":"Not Found"}', {status: 404, headers: {'content-type': 'application/json'}});
             const data = url.pathname.includes('/compare/') ? ${JSON.stringify(comparison)} : ${JSON.stringify(pr)};
             return new Response(JSON.stringify(data), {status: 200, headers: {'content-type': 'application/json'}});
           }
@@ -597,6 +598,7 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
       writeFileSync(shim, `globalThis.fetch = async request => {
         const url = new URL(typeof request === 'string' || request instanceof URL ? request : request.url);
         if (url.hostname !== 'api.github.com') throw new Error('Unexpected network');
+        if (url.pathname.includes('/contents/')) return new Response('{"message":"Not Found"}', {status: 404, headers: {'content-type': 'application/json'}});
         const data = url.pathname.includes('/compare/')
           ? ${JSON.stringify({ files: diff.files, merge_base_commit: { sha: mergeBase } })} : ${JSON.stringify(pr)};
         return new Response(JSON.stringify(data), {status: 200, headers: {'content-type': 'application/json'}});
@@ -683,6 +685,7 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
         writeFileSync(mockPath, `globalThis.fetch = async (request) => {
           const url = String(request.url ?? request);
           if (!url.startsWith('https://api.github.com/repos/allocator-one/rcl/')) throw new Error('Unexpected network: ' + url);
+          if (url.includes('/contents/')) return new Response('{"message":"Not Found"}', {status: 404, headers: {'content-type': 'application/json'}});
           const data = url.includes('/compare/') ? ${JSON.stringify({ files: diff.files, merge_base_commit: { sha: headSha } })} : ${JSON.stringify(pr)};
           return new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
         };`);
@@ -904,6 +907,7 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
       writeFileSync(shim, `import { readFileSync } from 'node:fs';
         globalThis.fetch = async input => { const url = new URL(String(input.url ?? input));
         const currentPrHeadSha = readFileSync(${JSON.stringify(currentPrHeadPath)}, 'utf8').trim();
+        if (url.hostname === 'api.github.com' && url.pathname.includes('/contents/')) return Response.json({ message: 'Not Found' }, { status: 404 });
         if (url.hostname === 'api.github.com') return Response.json(url.pathname.includes('/compare/')
           ? { files: [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 1,
               patch: '@@ -1 +1 @@\\n-a\\n+b' }] }

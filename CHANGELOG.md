@@ -18,6 +18,66 @@
   then refuses for lack of them, and the default roster is no longer trimmed
   quietly for a missing OpenRouter key. Without the flag, the environment still wins.
 
+## 4.5.37 - 2026-11-10
+
+- Report `launching` while an accepted convergence review prepares credentials,
+  configuration and its diff, before the round registers (RCL-236). Native
+  target ownership now covers that startup window, and `converge-status --wait`
+  waits through it. A PR-bound patch with a convergence target uses guarded
+  launch when no attempt was explicitly preclaimed, so its pending and completed
+  `lastLaunch` records remain visible outside review cycles too.
+
+## 4.5.36 - 2026-11-10
+
+- Resolve the temporary directories in `test/converge/fresh-review-close.test.ts`
+  to their real paths (RCL-237). On macOS `os.tmpdir()` is a symlink
+  (`/var/folders/…` to `/private/var/…`), so the fixtures tripped the review
+  cycle directory check, which correctly refuses a path that is not its own
+  real path. Three tests failed on a clean checkout there; the check is
+  unchanged.
+
+## 4.5.35 - 2026-11-10
+
+- Make `rcl converge-status` resolve a pull request by every form it accepts
+  (RCL-235). `--target owner/repo#N` or a pull request URL reported
+  `not_launched` for a round that was recorded under the `<repo>-<N>` slug, so
+  a lane using that form would relaunch a live round or wait on a dead one. A
+  pull request reference now also reads the slug and `owner/repo#N` keys and
+  answers from the one with the latest launch; a slug reads only its own key,
+  so query the key the round launched under. `--json` adds `requestedTarget`
+  when the answer came from another key than the one passed. A reference that
+  names no key (`#N`, a bare number, an issue URL) is refused with
+  `converge_target_form_unsupported` instead of reading as not launched.
+
+## 4.5.34 - 2026-11-10
+
+- Leave generated paths out of the reviewed patch of a PR (RCL-209). A release
+  that refreshes a bundled, served artifact (harness-cli#93 changed a 4.2 MB
+  OpenAPI spec and its generated help) could not be reviewed: the patch was
+  over the 64,000-line cap, so nothing could converge or pass the enforced
+  gate. For a PR whose full patch is over that cap, paths the base commit's
+  root `.gitattributes` marks `linguist-generated` now keep their file entry
+  (name, status, line counts and blob id, so `diff_sha256` still binds the full
+  head) but contribute no patch lines; a PR that fits is reviewed whole. The
+  base is the authority, never the head, so a PR cannot exempt its own files.
+  `run.target.left_out` records the reason, the commit, the count and up to 100
+  paths. Only a modified or deleted file is left out (an added or renamed one
+  stays reviewed), and so is any file below a directory with its own
+  `.gitattributes` (found in one recursive tree read; a truncated tree fails
+  the review) or under a rule the reader does not understand. A
+  `.gitattributes` the API cannot read fails the review instead of silently
+  reviewing a different patch.
+
+## 4.5.33 - 2026-11-10
+
+- Show which credential `rcl telemetry status` resolved (RCL-234). It now
+  prints the credential file path, the host and why that file won: an
+  org-scoped login for the repository's org, or the legacy `credentials.json`
+  and why no org-scoped login applied (no org in the repo config, no login on a
+  known host, or an org file naming a different host). `--json` adds
+  `credential.file` and `credential.reason`. The token is never printed, and
+  the reason names only the host, never user-info or a query from a stored URL.
+
 ## 4.5.32 - 2026-11-09
 
 - Resume a checkpointed pending retry after its host dies even when the attempt

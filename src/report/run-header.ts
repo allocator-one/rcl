@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import type { Config } from '../config/schema.js';
 import type { ResolvedGatingConfig } from '../consensus/gating.js';
 import type { StrictFallbackMarker } from '../consensus/strict-fallback.js';
-import type { Diff, FileChange } from '../resolver/types.js';
+import type { Diff, FileChange, LeftOutPaths } from '../resolver/types.js';
 import type { ReviewAssignment } from '../roles/types.js';
 import { detectProvider } from '../roles/dispatcher.js';
 import type { ReviewerEvidenceDescriptor } from './reviewer-evidence.js';
@@ -46,6 +46,8 @@ export interface RunTarget {
   base_ref?: string;
   /** SHA-256 over the canonical file/patch serialization (see diffDigest). */
   diff_sha256: string;
+  /** Generated files whose patch the council did not read; each is still bound in `diff_sha256`. */
+  left_out?: LeftOutPaths;
   files: number;
   additions: number;
   deletions: number;
@@ -137,6 +139,7 @@ export interface RunHeaderInput {
     baseSha?: string;
     headRef?: string;
     baseRef?: string;
+    leftOut?: LeftOutPaths;
   };
   diff: Diff;
   roster: RosterEntry[];
@@ -468,6 +471,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
       ...(target.headRef !== undefined ? { head_ref: target.headRef } : {}),
       ...(target.baseRef !== undefined ? { base_ref: target.baseRef } : {}),
       diff_sha256: diffDigest(diff.files),
+      ...(target.leftOut !== undefined ? { left_out: target.leftOut } : {}),
       files: diff.files.length,
       additions: diff.files.reduce((sum, f) => sum + f.additions, 0),
       deletions: diff.files.reduce((sum, f) => sum + f.deletions, 0),
