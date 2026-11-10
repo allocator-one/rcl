@@ -50,10 +50,26 @@ export function isUnsupportedConvergeTargetForm(input: string): boolean {
 }
 
 const STATE_NAME_SLUG_LIMIT = 48; // run-state.ts stateBaseName cuts the slug here, then appends `-` and a 16 digit hash and `.json`
-const STATE_NAME_CUT_LENGTH = STATE_NAME_SLUG_LIMIT + '-'.length + 16 + '.json'.length;
+const STATE_NAME_SUFFIX_LENGTH = '-'.length + 16 + '.json'.length;
+const STATE_NAME_CUT_LENGTH = STATE_NAME_SLUG_LIMIT + STATE_NAME_SUFFIX_LENGTH;
+const MAX_GITHUB_OWNER_LENGTH = 39;
 const STATE_HEADER_BYTES = 1024; // run-state.ts writes `version` then `target` first, so the key sits in the first lines
 const STATE_HEADER_TARGET = /"target"\s*:\s*"((?:[^"\\]|\\.)*)"/;
 const RECORDED_REFERENCE_KEY = /^([^/#\s]+)\/([^/#\s]+)#(\d+)$/;
+
+/**
+ * Whether a state file name cut at the slug limit can still be `<owner>-<repoSlug>-<number>`: GitHub owners are at
+ * most 39 characters, so the name's slug holds `<owner>-` and then a prefix of `<repoSlug>-<number>`. A cut name
+ * that cannot be is another target's, and its unreadable contents are none of this lookup's business.
+ */
+function cutNameMayRecordReference(name: string, repoSlug: string, number: string): boolean {
+  const slug = name.slice(0, name.length - STATE_NAME_SUFFIX_LENGTH).toLowerCase();
+  const rest = `${repoSlug}-${number}`;
+  for (let dash = slug.indexOf('-'); dash !== -1 && dash <= MAX_GITHUB_OWNER_LENGTH; dash = slug.indexOf('-', dash + 1)) {
+    if (dash > 0 && rest.startsWith(slug.slice(dash + 1))) return true;
+  }
+  return false;
+}
 
 /** The `target` a state file records, read from its first bytes so a long file costs no more than a short one. */
 async function recordedTarget(path: string): Promise<string> {
@@ -74,10 +90,11 @@ async function recordedTarget(path: string): Promise<string> {
  *
  * The state file name carries the target's sanitized slug, which narrows the
  * candidates before any file is opened. A name cut at the length limit may have
- * lost any part of the repository or the number, so every cut name stays a
- * candidate; the recorded `target` decides, read one file at a time from its
- * first bytes. A listing or read that fails throws: a miss built on a failed
- * discovery would read as a round that was never launched.
+ * lost part of the repository or the number, so it stays a candidate when it can
+ * still be `<owner>-<repo>-<N>`; the recorded `target` decides, read one file at
+ * a time from its first bytes. A listing or read of a candidate that fails
+ * throws: a miss or a stale answer built on a failed discovery would read as a
+ * round that was never launched or is not the latest.
  */
 export async function recordedReferenceKeys(gitCommonDir: string, input: string): Promise<string[]> {
   const slug = /^(.+)-(\d+)$/.exec(input.trim());
@@ -90,7 +107,8 @@ export async function recordedReferenceKeys(gitCommonDir: string, input: string)
   });
   const repoSlug = repo.toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
   const candidates = names.filter(name => name.endsWith('.json')
-    && (name.length >= STATE_NAME_CUT_LENGTH || name.toLowerCase().includes(`-${repoSlug}-${number}-`)));
+    && (name.length >= STATE_NAME_CUT_LENGTH ? cutNameMayRecordReference(name, repoSlug, number)
+      : name.toLowerCase().includes(`-${repoSlug}-${number}-`)));
   const keys = new Set<string>();
   for (const name of candidates) {
     const target = await recordedTarget(join(directory, name)).catch((error: NodeJS.ErrnoException) => {
