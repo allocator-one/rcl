@@ -28,16 +28,19 @@ describe('pinned PR patch under repository-local diff configuration', () => {
     baseSha = await git('rev-parse', 'HEAD');
     await writeFile(join(repo, 'sub', 'inside.ex'), 'new\n');
     await writeFile(join(repo, 'outside.ex'), 'new\n');
-    await git('commit', '-qam', 'head');
+    await git('update-index', '--add', '--cacheinfo', `160000,${baseSha},vendored`);
+    await git('add', 'sub', 'outside.ex');
+    await git('commit', '-qm', 'head');
     headSha = await git('rev-parse', 'HEAD');
     // A reader's own repository configuration must not decide which files a
     // "complete" PR patch contains.
     await git('config', 'diff.relative', 'true');
+    await git('config', 'diff.ignoreSubmodules', 'all');
   });
   afterAll(async () => { await rm(repo, { recursive: true, force: true }); });
 
-  it('keeps files outside the working subdirectory when diff.relative is configured', async () => {
+  it('keeps files outside the working subdirectory and submodule changes under repository-local diff configuration', async () => {
     const diff = await loadPinnedGitDiff({ cwd: join(repo, 'sub'), owner: 'o', repo: 'r', baseSha, headSha });
-    expect(diff.files.map(file => file.filename).sort()).toEqual(['outside.ex', 'sub/inside.ex']);
+    expect(diff.files.map(file => file.filename).sort()).toEqual(['outside.ex', 'sub/inside.ex', 'vendored']);
   });
 });

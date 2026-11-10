@@ -209,9 +209,10 @@ async function readPinnedPatch(
 ): Promise<Diff & { mergeBaseSha: string }> {
   let rawDiff: string;
   try {
-    // diff.relative would silently drop every file outside the reader's cwd.
+    // diff.relative and diff.ignoreSubmodules would silently drop files from a
+    // "complete" patch, so the reader's own configuration must not decide.
     rawDiff = await readGit(['-c', 'core.quotepath=false', '-c', 'diff.algorithm=myers',
-      '-c', 'diff.indentHeuristic=true', '-c', 'diff.relative=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
+      '-c', 'diff.indentHeuristic=true', '-c', 'diff.relative=false', 'diff', '--ignore-submodules=none', '--no-color', '--no-ext-diff', '--no-textconv',
       '--find-renames=50%', '--full-index', '--binary', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3',
       mergeBaseSha, headSha, '--'], maxBytes);
   } catch (error) {
