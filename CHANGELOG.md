@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.41 - 2026-11-10
+
 - Keep provider calls on HTTP/1.1 under Node's environment proxy (RCL-233). With
   `NODE_USE_ENV_PROXY=1` (or `--use-env-proxy`) and a proxy variable set, Node
   installs its own `EnvHttpProxyAgent` before user code runs; the HTTP/1.1
