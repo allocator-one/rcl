@@ -1,5 +1,5 @@
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,6 +106,13 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
 
     expect(await inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).toMatchObject({
       target: slug, status: 'not_launched' });
+  });
+
+  it('fails a slug status instead of reporting a miss when the recorded keys cannot be listed', async () => {
+    const dir = await commonDir();
+    await writeFile(join(dir, 'rcl-converge-runs'), 'not a directory'); // a listing error that is not a missing directory
+
+    await expect(inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).rejects.toThrow();
   });
 
   it('keeps every other key as its own and only candidate', () => {

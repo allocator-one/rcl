@@ -61,23 +61,30 @@ const RECORDED_REFERENCE_KEY = /^([^/#\s]+)\/([^/#\s]+)#(\d+)$/;
  *
  * The state file name carries the target's sanitized slug, which narrows the
  * candidates before any file is opened; a name cut at the length limit may hide
- * the number, so it stays a candidate. The recorded `target` decides.
+ * the number, so it stays a candidate when it still names the repository. The
+ * recorded `target` decides.
  */
 export async function recordedReferenceKeys(gitCommonDir: string, input: string): Promise<string[]> {
   const slug = /^(.+)-(\d+)$/.exec(input.trim());
   if (!slug) return [];
   const [, repo, number] = slug as unknown as [string, string, string];
   const directory = dirname(convergeRunStatePath(gitCommonDir, input.trim()));
-  const names = await readdir(directory).catch(() => [] as string[]);
-  const wanted = `-${repo.toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}-${number}-`;
-  const candidates = names.filter(name => name.endsWith('.json')
-    && (name.toLowerCase().includes(wanted) || name.length >= STATE_NAME_CUT_LENGTH));
-  const keys = await Promise.all(candidates.map(async name => {
+  // Only a missing directory is an empty one: any other failure means the recorded keys are unknown, and an
+  // answer built on that would read as a reliable miss.
+  const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return [] as string[];
+    throw error;
+  });
+  const repoSlug = repo.toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+  const candidates = names.filter(name => name.endsWith('.json') && (name.toLowerCase().includes(`-${repoSlug}-${number}-`)
+    || (name.length >= STATE_NAME_CUT_LENGTH && name.toLowerCase().includes(`-${repoSlug}`))));
+  const keys: Array<string | undefined> = [];
+  for (const name of candidates) { // one at a time: a status poll must not open every long-named state file at once
     try {
       const { target } = JSON.parse(await readFile(join(directory, name), 'utf8')) as { target?: unknown };
       const reference = typeof target === 'string' ? RECORDED_REFERENCE_KEY.exec(target) : null;
-      return reference && reference[2]!.toLowerCase() === repo.toLowerCase() && reference[3] === number ? target as string : undefined;
-    } catch { return undefined; }
-  }));
+      keys.push(reference && reference[2]!.toLowerCase() === repo.toLowerCase() && reference[3] === number ? target as string : undefined);
+    } catch { keys.push(undefined); } // an unreadable or foreign file is not this target's record
+  }
   return [...new Set(keys.filter((key): key is string => key !== undefined))];
 }
