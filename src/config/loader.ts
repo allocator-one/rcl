@@ -148,6 +148,7 @@ function mergeWithDefaults(config: Config, preserveDefaultRoster = false): Confi
     concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
     providerConcurrency: config.providerConcurrency ? { ...config.providerConcurrency } : undefined,
     reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+    openaiReasoningEffort: config.openaiReasoningEffort,
     githubToken: config.githubToken ?? process.env['GITHUB_TOKEN'],
     context: config.context,
     spec: config.spec,

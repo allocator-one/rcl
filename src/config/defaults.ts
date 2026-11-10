@@ -73,6 +73,15 @@ export const DEFAULT_MAX_RETRIES = 3;
  * explicit configuration can still select another effort for other models.
  */
 export const DEFAULT_REASONING_EFFORT = 'low';
+
+/**
+ * Effort for OpenAI review calls. Before RCL-240 rcl sent none. A 20-round
+ * replay put gpt-6-sol's provider default level with medium. High caught 14
+ * of 16 verifier-confirmed findings against 11, at p50 32 s and p90 60 s,
+ * still inside Opus's own window. Applied at the adapter factory rather than
+ * materialized into config, so config digests keep their pre-4.5.42 shape.
+ */
+export const DEFAULT_OPENAI_REASONING_EFFORT = 'high';
 export const DEFAULT_CONCURRENCY = 9;
 /**
  * Provider admission limits inside the blocking runner. The default prevents

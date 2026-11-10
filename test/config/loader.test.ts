@@ -48,6 +48,12 @@ describe('loadConfig', () => {
     expect(config.concurrency).toBe(9);
   });
 
+  it('keeps a configured OpenAI review effort and leaves it unset by default', async () => {
+    expect((await loadConfig(undefined, dir)).openaiReasoningEffort).toBeUndefined();
+    await writeFile(join(dir, '.review-council.yml'), 'openaiReasoningEffort: high\n');
+    expect((await loadConfig(undefined, dir)).openaiReasoningEffort).toBe('high');
+  });
+
   it('preserves an explicit concurrency of six for rollback', async () => {
     await writeFile(join(dir, '.review-council.yml'), 'concurrency: 6\n');
     const config = await loadConfig(undefined, dir);

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 4.5.42 - 2026-11-10
+
+- Review direct OpenAI models at `high` reasoning effort (RCL-240). rcl sent no
+  `reasoning_effort` on OpenAI review calls, so Sol reviewed at its provider
+  default. A replay of 20 recent rounds found that high caught 14 of 16
+  verifier-confirmed findings against 11 at the default. Its p50 was 32 s and
+  its p90 60 s, inside Opus's own window, so rounds do not get longer. The
+  new `openaiReasoningEffort` setting (`low`, `medium` or `high`) overrides
+  it. The OpenAI seat stays `openai/gpt-6-sol`: in the same replay
+  gpt-6.1-sol raised fewer findings at every effort, and at high it was
+  4.6× slower.
+
 ## 4.5.41 - 2026-11-10
 
 - Keep provider calls on HTTP/1.1 under Node's environment proxy (RCL-233). With

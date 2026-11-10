@@ -586,6 +586,8 @@ maxRetries: 3
 
 # Reasoning effort for OpenRouter reviewers: low | medium | high (default low)
 reasoningEffort: low
+# Reasoning effort for direct OpenAI reviewers: low | medium | high (default high)
+openaiReasoningEffort: high
 
 # Context files attached to every review, and the spec for spec-compliance
 context:
@@ -655,7 +657,10 @@ reviewers (default `low`, a supported level for the default Kimi K3, which
 advertises `low`, `high` and `max` — avoid `medium` for it). Check the
 selected model's supported levels before overriding: unbounded reasoning makes
 these models spend the whole completion budget thinking before they answer.
-Direct Sol and Gemini reviewers use their provider defaults. Opus 5.5 reviews
+Direct OpenAI reviewers get `openaiReasoningEffort` (default `high`). On a
+20-round replay, high caught more verifier-confirmed findings than Sol's provider
+default and still finished inside Opus's window (RCL-240). Gemini reviewers use
+their provider default. Opus 5.5 reviews
 explicitly use `high` effort, streaming, and a 65,536-token output ceiling so
 thinking and findings share adequate headroom. Opus 5.5's API default is
 `medium`; rcl sets `high` because a review gate is intelligence-sensitive work
