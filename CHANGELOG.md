@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.45 - 2026-11-10
+
 - Add the opt-in `cross-context-coupling` lens (RCL-49). With a `couplingLens`
   section declaring a repository's bounded contexts, a deterministic scan finds
   added lines in one context that reference another context's modules and hands
