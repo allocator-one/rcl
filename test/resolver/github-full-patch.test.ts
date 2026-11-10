@@ -146,6 +146,8 @@ describe('authoritative PR patch acquisition', () => {
       raw: 'diff --git "a/we\\"ird\\\\.png" "b/we\\"ird\\\\.png"\nindex eeeeeee..ddddddd 100644\nBinary files "a/we\\"ird\\\\.png" and "b/we\\"ird\\\\.png" differ\n' },
     { name: 'a non-ASCII name Git left unquoted (core.quotepath=false)', filename: 'caf\u00e9.png', status: 'modified',
       raw: 'diff --git a/caf\u00e9.png b/caf\u00e9.png\nindex eeeeeee..ddddddd 100644\nBinary files a/caf\u00e9.png and b/caf\u00e9.png differ\n' },
+    { name: 'a non-ASCII name with a tab under core.quotepath=false', filename: 'caf\u00e9\tx.png', status: 'modified',
+      raw: 'diff --git "a/caf\u00e9\\tx.png" "b/caf\u00e9\\tx.png"\nindex eeeeeee..ddddddd 100644\nBinary files "a/caf\u00e9\\tx.png" and "b/caf\u00e9\\tx.png" differ\n' },
   ])('certifies a patchless change whose Git header quotes the path: $name', async ({ raw, name: _name, ...file }) => {
     const sha = 'd'.repeat(40);
     const f = fixture([{ ...file, additions: 0, deletions: 0, sha }], raw);

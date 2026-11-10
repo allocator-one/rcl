@@ -22,6 +22,8 @@
   pure-rename change is certified under either Git path quoting, and an attested PR
   review refuses `--max-review-chunks` and `--max-blocking-calls` unless the
   exact-head label grant supplies the same values.
+  A non-ASCII path that also needs C-quoting is matched in the form Git prints under
+  `core.quotepath=false`.
 
 ## 4.5.41 - 2026-11-10
 

@@ -427,9 +427,17 @@ function quoteGitPath(path: string, quotePath: boolean): string {
   const needsQuote = (byte: number): boolean => byte < 0x20 || byte === 0x22 || byte === 0x5c || byte === 0x7f || (quotePath && byte >= 0x80);
   if (!bytes.some(needsQuote)) return path;
   let out = '"';
+  // Bytes Git leaves literal (non-ASCII under core.quotepath=false) are UTF-8
+  // text, so decode each run instead of mapping bytes to characters.
+  let literal: number[] = [];
+  const flush = (): void => { out += Buffer.from(literal).toString('utf8'); literal = []; };
   for (const byte of bytes) {
-    out += GIT_PATH_ESCAPES.get(byte) ?? (needsQuote(byte) ? `\\${byte.toString(8).padStart(3, '0')}` : String.fromCharCode(byte));
+    const escape = GIT_PATH_ESCAPES.get(byte) ?? (needsQuote(byte) ? `\\${byte.toString(8).padStart(3, '0')}` : undefined);
+    if (escape === undefined) { literal.push(byte); continue; }
+    flush();
+    out += escape;
   }
+  flush();
   return `${out}"`;
 }
 
