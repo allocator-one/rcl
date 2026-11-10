@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Keep provider calls on HTTP/1.1 under Node's environment proxy (RCL-233). With
+  `NODE_USE_ENV_PROXY=1` (or `--use-env-proxy`) and a proxy variable set, Node
+  installs its own `EnvHttpProxyAgent` before user code runs; the HTTP/1.1
+  transport from RCL-213 took it for a customised dispatcher and left it alone,
+  so proxy users on Node 26 could keep HTTP/2 through the tunnel. The transport
+  now replaces an option-less `EnvHttpProxyAgent` with one that has
+  `allowH2: false`; a dispatcher a `--import` preload customised still survives.
+
 ## 4.5.39 - 2026-11-10
 
 - Accept a group-writable recovery-lock ancestor when its group is the owner's

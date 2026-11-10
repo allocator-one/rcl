@@ -27,20 +27,42 @@ export function installHttp1Transport(options: { connect?: buildConnector.BuildO
 }
 
 /**
- * undici installs an option-less `Agent` when nothing set a global dispatcher. Anything else, a
- * different class or an `Agent` carrying options, was put there on purpose. The options live under
- * a private symbol, so a dispatcher whose options cannot be read counts as customised: the
- * transport then stays out of the way instead of overriding it.
+ * undici installs an option-less `Agent` when nothing set a global dispatcher, and Node installs an
+ * option-less `EnvHttpProxyAgent` before user code runs when its environment proxy is on (RCL-233).
+ * Anything else, a different class or an agent carrying options, was put there on purpose. The
+ * options live under a private symbol, so a dispatcher whose options cannot be read counts as
+ * customised: the transport then stays out of the way instead of overriding it.
  */
 function isUntouchedDefault(dispatcher: Dispatcher): boolean {
-  if (dispatcher.constructor.name !== 'Agent') return false;
-  const options = agentOptions(dispatcher);
-  return options !== undefined && isDeepStrictEqual(options, agentOptions(new Agent()));
+  const name = dispatcher.constructor.name;
+  if (name === 'Agent') return hasDefaultOptions(dispatcher);
+  // An EnvHttpProxyAgent keeps its options private, but builds a plain `Agent` from everything
+  // except the proxy settings, which is where a customised timeout or connect option lands.
+  if (name === 'EnvHttpProxyAgent' && envProxyEnabled()) return hasDefaultOptions(namedMember(dispatcher, 'no proxy agent'));
+  return false;
 }
 
-function agentOptions(agent: Dispatcher): unknown {
-  const key = Object.getOwnPropertySymbols(agent).find((symbol) => symbol.description === 'options');
-  return key === undefined ? undefined : (agent as unknown as Record<symbol, unknown>)[key];
+function hasDefaultOptions(agent: unknown): boolean {
+  const options = agentOptions(agent);
+  return options !== undefined && isDeepStrictEqual(definedOnly(options), definedOnly(agentOptions(new Agent())));
+}
+
+/**
+ * Node's bundled undici and this package's copy are different versions, so the same default `Agent`
+ * can carry an option as `undefined` in one and omit it in the other.
+ */
+function definedOnly(options: unknown): unknown {
+  if (typeof options !== 'object' || options === null) return options;
+  return Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
+}
+
+function namedMember(owner: object, description: string): unknown {
+  const key = Object.getOwnPropertySymbols(owner).find((symbol) => symbol.description === description);
+  return key === undefined ? undefined : (owner as Record<symbol, unknown>)[key];
+}
+
+function agentOptions(agent: unknown): unknown {
+  return typeof agent === 'object' && agent !== null ? namedMember(agent, 'options') : undefined;
 }
 
 /**

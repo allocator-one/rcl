@@ -1,10 +1,12 @@
+import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import http2 from 'node:http2';
 import net, { type AddressInfo, type Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { GoogleGenAI } from '@google/genai';
-import { Agent, getGlobalDispatcher, setGlobalDispatcher } from 'undici';
+import { Agent, EnvHttpProxyAgent, getGlobalDispatcher, setGlobalDispatcher } from 'undici';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/dispatch/anthropic.js';
 import { installHttp1Transport } from '../../src/dispatch/http1-transport.js';
@@ -207,6 +209,77 @@ describe('environment proxy (RCL-213)', () => {
     installHttp1Transport({ connect });
     await fetch(baseUrl, { method: 'POST', body: '{}' });
     expect(connects).toEqual([]);
+  });
+
+  // Node installs its own EnvHttpProxyAgent as the global dispatcher before user code runs when the
+  // environment proxy is on (RCL-233), so the untouched default there is not a plain Agent.
+  describe('with Node\'s own EnvHttpProxyAgent as the dispatcher (RCL-233)', () => {
+    function useEnvProxy(): void {
+      vi.stubEnv('NODE_USE_ENV_PROXY', '1');
+      vi.stubEnv('HTTPS_PROXY', proxyUrl);
+      vi.stubEnv('https_proxy', proxyUrl);
+      vi.stubEnv('NO_PROXY', '');
+      vi.stubEnv('no_proxy', '');
+    }
+
+    it('replaces it, so provider calls through the tunnel stay HTTP/1.1', async () => {
+      useEnvProxy();
+      const nodeDefault = new EnvHttpProxyAgent();
+      setGlobalDispatcher(nodeDefault);
+      const installed = installHttp1Transport({ connect });
+      expect(installed).not.toBe(nodeDefault);
+      expect(getGlobalDispatcher()).toBe(installed);
+      protocols = [];
+      const response = await fetch(baseUrl, { method: 'POST', body: '{}' });
+      expect(response.status).toBe(400);
+      expect(connects).toEqual([new URL(baseUrl).host]);
+      expect(protocols).toEqual(['http/1.1']);
+    });
+
+    it('leaves a preload\'s customised EnvHttpProxyAgent in place', () => {
+      useEnvProxy();
+      const preload = new EnvHttpProxyAgent({ headersTimeout: 0, bodyTimeout: 0 });
+      setGlobalDispatcher(preload);
+      expect(installHttp1Transport({ connect })).toBe(preload);
+      expect(getGlobalDispatcher()).toBe(preload);
+    });
+
+    it('is left in place when installing twice', () => {
+      useEnvProxy();
+      setGlobalDispatcher(new EnvHttpProxyAgent());
+      const first = installHttp1Transport({ connect });
+      expect(installHttp1Transport({ connect })).toBe(first);
+    });
+  });
+
+  describe('in a process Node started with its real environment-proxy default (RCL-233)', () => {
+    const run = promisify(execFile);
+    const probe = fileURLToPath(new URL('../fixtures/env-proxy-transport-probe.ts', import.meta.url));
+    const preload = fileURLToPath(new URL('../fixtures/env-proxy-preload.mjs', import.meta.url));
+    const childEnv = (): NodeJS.ProcessEnv => ({
+      ...process.env,
+      NODE_USE_ENV_PROXY: '1',
+      HTTPS_PROXY: proxyUrl,
+      https_proxy: proxyUrl,
+      NODE_OPTIONS: '',
+    });
+    const probeOutput = async (...nodeArgs: string[]): Promise<Record<string, unknown>> => {
+      const { stdout } = await run(process.execPath, [...nodeArgs, '--import', 'tsx', probe], { env: childEnv() });
+      return JSON.parse(stdout.trim().split('\n').at(-1) ?? '') as Record<string, unknown>;
+    };
+
+    it('replaces the dispatcher Node installed', async () => {
+      expect(await probeOutput()).toEqual({
+        before: 'EnvHttpProxyAgent',
+        after: 'EnvHttpProxyAgent',
+        replaced: true,
+        globalIsInstalled: true,
+      });
+    });
+
+    it('keeps the dispatcher a --import preload installed', async () => {
+      expect(await probeOutput('--import', preload)).toMatchObject({ before: 'EnvHttpProxyAgent', replaced: false });
+    });
   });
 });
 
