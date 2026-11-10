@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   COUPLING_LENS_ROLE_NAME,
   couplingCandidateNotes,
+  MAX_CANDIDATE_NOTES,
   detectCrossContextCoupling,
   specializeCouplingLensRole,
   type CouplingFile,
@@ -321,6 +322,16 @@ describe('specializeCouplingLensRole', () => {
     expect(notes[0]!.text).toContain('"lib/allocator_one/contacts/x.ex":2');
     expect(notes[0]!.text).toContain('Contacts → DataRoom');
     expect(notes[0]!.text).toContain('"AllocatorOne.DataRoom"');
+  });
+
+  it('bounds the listed candidates so the notes cannot outgrow the prompt budget', () => {
+    const lines = Array.from({ length: MAX_CANDIDATE_NOTES + 25 }, (_, i) => `  alias AllocatorOne.DataRoom.Mod${i}`);
+    const notes = couplingCandidateNotes([file('lib/allocator_one/contacts/big.ex', added(...lines))], ELIXIR);
+
+    const listed = notes[0]!.text.split('\n').filter((line) => line.startsWith('- '));
+    expect(listed).toHaveLength(MAX_CANDIDATE_NOTES);
+    expect(notes[0]!.text).toContain('25 more candidate(s) not listed');
+    expect(Buffer.byteLength(notes[0]!.text)).toBeLessThan(16 * 1024);
   });
 
   it('adds no notes when the scan found nothing', () => {

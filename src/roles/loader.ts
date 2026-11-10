@@ -119,11 +119,14 @@ export async function resolveRoles(
         continue;
       }
       if (missingContent.has(role.name)) {
-        console.warn(
-          role.name === COUPLING_LENS_ROLE_NAME
-            ? `Warning: role "${role.name}" was requested but no couplingLens config was found — it will run without declared contexts`
-            : `Warning: role "${role.name}" was requested but no spec file was found — it will run without that content`
-        );
+        // Without declared contexts the lens has no candidates and can only
+        // say nothing, so an explicit request for it is an error (RCL-242).
+        if (role.name === COUPLING_LENS_ROLE_NAME) {
+          throw new Error(
+            `Role "${role.name}" was requested but no couplingLens config was found. Declare the repository's contexts under "couplingLens" in the rcl config, or drop the role.`
+          );
+        }
+        console.warn(`Warning: role "${role.name}" was requested but no spec file was found — it will run without that content`);
       }
       result.push(role);
     }

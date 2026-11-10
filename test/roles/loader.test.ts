@@ -175,11 +175,9 @@ describe('resolveRoles — cross-context coupling lens', () => {
     }
   });
 
-  it('warns when requested by name without configuration but keeps the seat', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const roles = await resolveRoles(emptyConfig, ['cross-context-coupling']);
-    expect(roles.map((r) => r.name)).toEqual(['cross-context-coupling']);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('couplingLens'));
+  it('refuses a by-name request without configuration instead of running an unspecialized seat', async () => {
+    await expect(resolveRoles(emptyConfig, ['cross-context-coupling'])).rejects.toThrow(/couplingLens/);
+    await expect(resolveRoles({ roles: ['security', 'Cross-Context-Coupling'] }, undefined)).rejects.toThrow(/couplingLens/);
   });
 
   it('does not warn when configured', async () => {
