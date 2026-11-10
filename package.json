@@ -10,7 +10,8 @@
   "files": [
     "dist",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "npm-shrinkwrap.json"
   ],
   "scripts": {
     "build": "tsc",
@@ -19,6 +20,8 @@
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run lint && npm test",
+    "prepack": "node scripts/build-shrinkwrap.mjs",
+    "postpack": "node -e \"require('fs').rmSync('npm-shrinkwrap.json',{force:true})\"",
     "build:skills": "node scripts/build-skills.mjs"
   },
   "engines": {
