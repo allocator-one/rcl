@@ -1189,6 +1189,7 @@ describe('rcl review — guarded native launch', () => {
     { args: ['--round', '27'], error: /wrong_round.*round 1/i },
     { args: ['--json-file', 'missing-directory/report.json'], error: /ENOENT|output/i },
     { args: ['--reviewer', 'openai/fixture:general'], error: /missing_provider_credentials/i },
+    { args: ['--harness-keys-first'], error: /harness_keys_unavailable.*RCL_NO_HARNESS_KEYS/is },
     { args: ['--context', 'missing-context.md'], error: /unreadable_context/i },
     { args: ['--spec', 'missing-spec.md'], error: /unreadable_spec/i },
     { args: ['--config', 'missing-config.json'], error: /ConfigError/i },
