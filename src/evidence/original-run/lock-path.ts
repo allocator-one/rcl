@@ -40,12 +40,17 @@ const userdbServiceDirectory = '/run/systemd/userdb'; const homedService = 'io.s
 type DirectoryLister = (path: string) => Promise<string[]>;
 async function usesOnlyLocalAccounts(read: AccountReader, list: DirectoryLister): Promise<boolean> {
   const lines = (await read('/etc/nsswitch.conf')).split('\n').map(line => line.replace(/#.*/, '').trim());
-  const sourcesOf = (database: string): string[] | undefined => {
-    const line = lines.find(candidate => candidate.startsWith(`${database}:`));
-    return line?.slice(database.length + 1).replace(/\[[^\]]*\]/g, ' ').split(/\s+/).filter(Boolean);
+  // A line spelled other than `name: sources`, or a repeated one, is read differently by glibc; null fails closed.
+  const sourcesOf = (database: string): string[] | undefined | null => {
+    const matches = lines.filter(candidate => new RegExp(`^${database}\\s*:`).test(candidate));
+    if (matches.length === 0) return undefined;
+    if (matches.length > 1 || !matches[0]!.startsWith(`${database}:`)) return null;
+    return matches[0]!.slice(database.length + 1).replace(/\[[^\]]*\]/g, ' ').split(/\s+/).filter(Boolean);
   };
   // glibc falls back to the group database when there is no initgroups line.
-  const databases = [sourcesOf('passwd'), sourcesOf('group'), sourcesOf('initgroups') ?? []];
+  const initgroups = sourcesOf('initgroups');
+  if (initgroups === null) return false;
+  const databases = [sourcesOf('passwd'), sourcesOf('group'), initgroups ?? []];
   if (databases.slice(0, 2).some(sources => !sources?.includes('files')) || databases.some(sources => sources!.some(source => !localAccountSources.has(source)))) return false;
   if (!databases.some(sources => sources!.includes('systemd'))) return true;
   for (const directory of userdbDirectories) {

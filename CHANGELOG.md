@@ -21,7 +21,9 @@
   none of `/etc/userdb`, `/run/userdb`, `/run/host/userdb`, `/usr/lib/userdb`
   and `/usr/local/lib/userdb` holds a record and no systemd-homed socket exists
   under `/run/systemd/userdb`. A userdb service registered elsewhere, or one
-  started after the check, is outside the claim. The directory must also have
+  started after the check, is outside the claim. A `passwd`, `group` or
+  `initgroups` line that is repeated or spelled with a space before the colon
+  fails closed. The directory must also have
   no POSIX ACL. An unreadable account database, a shared group, an LDAP, SSSD
   or NIS source, an ACL, world-write, a root-owned group-writable directory
   (also for a root caller) and the 0700 lock root are refused as before. The
