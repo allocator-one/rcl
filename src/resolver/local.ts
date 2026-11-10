@@ -126,6 +126,9 @@ function parseDiffText(diffText: string): ParsedHunk[] {
 
     const before = field('--- '), after = field('+++ ');
     if ((before === undefined) !== (after === undefined)) return invalidPath();
+    // Both markers name their paths, so a `git diff --no-index old new` patch with
+    // two different paths and no rename metadata is still fully verified below.
+    const markersNamePaths = before !== undefined && after !== undefined;
     if (before !== undefined && after !== undefined) {
       // Git adds a tab after an unquoted marker containing spaces. It is a
       // separator, not part of the path (actual tabs are C-quoted).
@@ -142,7 +145,7 @@ function parseDiffText(diffText: string): ParsedHunk[] {
       bPath = newPath ?? oldPath;
     }
     if (aPath === undefined || bPath === undefined) aPath = bPath = symmetricHeaderPath(headerLine);
-    if ((status !== 'renamed' && status !== 'copied' && aPath !== bPath) || !headerMatches(headerLine, aPath, bPath)) return invalidPath();
+    if ((status !== 'renamed' && status !== 'copied' && !markersNamePaths && aPath !== bPath) || !headerMatches(headerLine, aPath, bPath)) return invalidPath();
     const filename = status === 'deleted' ? aPath : bPath;
 
     // Extract the actual patch lines (@@...)

@@ -48,6 +48,11 @@ describe('Git patch path identity', () => {
       previousFilename: 'source.ts', patch: '@@ -1 +1 @@\n-old\n+new\n' }]);
   });
 
+  it('accepts a git diff --no-index patch whose two verified marker paths differ', () => {
+    const diff = parseDiffFromString('diff --git a/old.ts b/new.ts\nindex 1111111..2222222 100644\n--- a/old.ts\n+++ b/new.ts\n@@ -1 +1 @@\n-old\n+new\n');
+    expect(diff.files).toMatchObject([{ filename: 'new.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new\n' }]);
+  });
+
   it('accepts a filename that validly contains U+FFFD when Git quotes its UTF-8 bytes', () => {
     const quoted = '"a/f\\357\\277\\275.ts"';
     const diff = parseDiffFromString(`diff --git ${quoted} ${quoted.replace('a/', 'b/')}\n--- ${quoted}\n+++ ${quoted.replace('a/', 'b/')}\n@@ -1 +1 @@\n-old\n+new\n`);

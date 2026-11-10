@@ -28,6 +28,8 @@
   contains U+FFFD is told apart from a replacement left by lossy decoding.
   A pinned patch whose bytes are not valid UTF-8 is refused instead of having those
   bytes replaced, locally and from hosted acquisition.
+  A `git diff --no-index` patch whose two verified marker paths differ is still
+  accepted, as it was before path verification.
 
 ## 4.5.41 - 2026-11-10
 
