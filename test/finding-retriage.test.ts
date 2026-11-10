@@ -110,7 +110,7 @@ describe('retriage evidence guards', () => {
 });
 
 async function command(options: { submit?: boolean; postStatus?: number; readStatus?: number;
-  reason?: string | Uint8Array; missingFile?: boolean; receipt?: { inserted: number; duplicates: number };
+  reason?: string | Uint8Array; missingFile?: boolean; reasonFile?: string; receipt?: { inserted: number; duplicates: number };
   mutate?: (input: ReturnType<typeof fixture>) => void } = {}) {
   const input = fixture();
   const cwd = await mkdtemp(join(tmpdir(), 'rcl-retriage-command-'));
@@ -126,7 +126,7 @@ async function command(options: { submit?: boolean; postStatus?: number; readSta
   const out: string[] = [];
   const err: string[] = [];
   const code = await runFindingRetriage({ target: input.target, run: input.runId, reportSha256: input.reportSha256,
-    findingRef: input.findingRef, forPr: 'example/project#42', reasonFile: 'reason.txt', submit: options.submit }, {
+    findingRef: input.findingRef, forPr: 'example/project#42', reasonFile: options.reasonFile ?? 'reason.txt', submit: options.submit }, {
     rclVersion: '3.4.0', cwd, fetchImpl: fetch,
     env: { HARNESS_API_TOKEN: 'aone_SYNTHETIC_TEST_TOKEN', HARNESS_API_URL: 'https://harness.example.test' },
     credentialsPath: join(cwd, 'no-credentials'), stdout: (s) => out.push(s), stderr: (s) => err.push(s),
@@ -234,6 +234,16 @@ describe('retriage command failures', () => {
     const result = await command({ ...options, submit: true });
     expect(result.code).toBe(2);
     expect(result.requests).toEqual([]);
+  });
+
+  // A launcher under `env -i` expands an unset variable to an empty --reason-file, which resolves to the
+  // working directory; that used to surface as a bare "EISDIR" (RCL-217).
+  it.each(['', '.'])('names a --reason-file that is a directory, not a bare EISDIR (%j)', async (reasonFile) => {
+    const result = await command({ submit: true, reasonFile });
+    expect(result.code).toBe(2);
+    expect(result.requests).toEqual([]);
+    expect(result.err).not.toContain('EISDIR');
+    expect(result.err).toContain('--reason-file');
   });
 
   it('refuses mismatched recorded evidence without posting', async () => {
