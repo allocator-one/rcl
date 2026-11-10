@@ -27,20 +27,75 @@ export function installHttp1Transport(options: { connect?: buildConnector.BuildO
 }
 
 /**
- * undici installs an option-less `Agent` when nothing set a global dispatcher. Anything else, a
- * different class or an `Agent` carrying options, was put there on purpose. The options live under
- * a private symbol, so a dispatcher whose options cannot be read counts as customised: the
- * transport then stays out of the way instead of overriding it.
+ * undici installs an option-less `Agent` when nothing set a global dispatcher, and Node installs an
+ * option-less `EnvHttpProxyAgent` before user code runs when its environment proxy is on (RCL-233).
+ * Anything else, a different class or an agent carrying options, was put there on purpose. The
+ * options live under a private symbol, so a dispatcher whose options cannot be read counts as
+ * customised: the transport then stays out of the way instead of overriding it.
  */
 function isUntouchedDefault(dispatcher: Dispatcher): boolean {
-  if (dispatcher.constructor.name !== 'Agent') return false;
-  const options = agentOptions(dispatcher);
-  return options !== undefined && isDeepStrictEqual(options, agentOptions(new Agent()));
+  const name = dispatcher.constructor.name;
+  if (name === 'Agent') return hasDefaultOptions(dispatcher);
+  // An EnvHttpProxyAgent keeps its options private, but builds a plain `Agent` from everything
+  // except the proxy settings, which is where a customised timeout or connect option lands. The
+  // proxy settings land in the proxy agents it builds, so those are compared with the environment's.
+  if (name === 'EnvHttpProxyAgent' && envProxyEnabled()) {
+    return hasDefaultOptions(namedMember(dispatcher, 'no proxy agent')) && routesByEnvironment(dispatcher);
+  }
+  return false;
 }
 
-function agentOptions(agent: Dispatcher): unknown {
-  const key = Object.getOwnPropertySymbols(agent).find((symbol) => symbol.description === 'options');
-  return key === undefined ? undefined : (agent as unknown as Record<symbol, unknown>)[key];
+/**
+ * Whether an `EnvHttpProxyAgent` sends the http and https traffic where the environment says, as a
+ * default one does. A preload's explicit `httpProxy` or `httpsProxy` differs from it and must survive.
+ * An explicit `noProxy` stays private inside the agent and cannot be seen. A route that cannot be
+ * read counts as customised, like an option that cannot be read.
+ */
+function routesByEnvironment(dispatcher: object): boolean {
+  let reference: EnvHttpProxyAgent;
+  try {
+    reference = new EnvHttpProxyAgent();
+  } catch {
+    return false;
+  }
+  reference.close().catch(() => undefined);
+  const current = proxyRoutes(dispatcher);
+  return !current.includes(undefined) && isDeepStrictEqual(current, proxyRoutes(reference));
+}
+
+/** The proxy URI each protocol goes through, `'direct'` when it uses the agent without a proxy. */
+function proxyRoutes(dispatcher: object): unknown[] {
+  const direct = namedMember(dispatcher, 'no proxy agent');
+  return ['http proxy agent', 'https proxy agent'].map((name) => {
+    const agent = namedMember(dispatcher, name);
+    if (typeof agent !== 'object' || agent === null) return undefined;
+    if (agent === direct) return 'direct';
+    const proxy = namedMember(agent, 'proxy agent options');
+    return typeof proxy === 'object' && proxy !== null ? (proxy as { uri?: unknown }).uri : undefined;
+  });
+}
+
+function hasDefaultOptions(agent: unknown): boolean {
+  const options = agentOptions(agent);
+  return options !== undefined && isDeepStrictEqual(definedOnly(options), definedOnly(agentOptions(new Agent())));
+}
+
+/**
+ * Node's bundled undici and this package's copy are different versions, so the same default `Agent`
+ * can carry an option as `undefined` in one and omit it in the other.
+ */
+function definedOnly(options: unknown): unknown {
+  if (typeof options !== 'object' || options === null) return options;
+  return Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
+}
+
+function namedMember(owner: object, description: string): unknown {
+  const key = Object.getOwnPropertySymbols(owner).find((symbol) => symbol.description === description);
+  return key === undefined ? undefined : (owner as Record<symbol, unknown>)[key];
+}
+
+function agentOptions(agent: unknown): unknown {
+  return typeof agent === 'object' && agent !== null ? namedMember(agent, 'options') : undefined;
 }
 
 /**
