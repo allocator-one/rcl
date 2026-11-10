@@ -1,5 +1,6 @@
 import { loadConvergeAttemptState } from './attempt-budget.js';
 import type { GuardedLaunchState } from './launch-record.js';
+import { isLaunchPreflight } from './launch-phase.js';
 import { inspectProcessIdentity } from './process-identity.js';
 import { loadConvergeRunState, type ConvergeRunState } from './run-state.js';
 import { withNativeTarget } from './target-ownership.js';
@@ -168,7 +169,7 @@ async function inspectTargetLiveness(options: RoundLivenessOptions): Promise<Rou
   }
   // A live guarded review owns the target; describe its launch once it is recorded.
   const { launch } = await readLaunch(options.gitCommonDir, target).catch(() => ({ launch: undefined }));
-  const registered = launch?.status === 'pending';
+  const registered = launch?.status === 'pending' && !await isLaunchPreflight(options.gitCommonDir, target);
   return { target, status: registered ? 'running' : 'launching', action: 'wait', ...(registered ? { launch: describeLaunch(launch) } : {}),
     message: registered ? `A review process holds the target and is working on ${label(launch)}.` +
       (options.headSha !== undefined && launch.headSha !== options.headSha

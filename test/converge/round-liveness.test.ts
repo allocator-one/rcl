@@ -96,6 +96,20 @@ describe('converge round liveness (RCL-232)', () => {
     expect(status).toMatchObject({ status: 'dead', action: 'resume', launch: { attempt: 1, round: 1, headSha } });
   });
 
+  it('keeps an abandoned pending record out of retry preflight, then reports its resumed council', async () => {
+    const options = await abandonedLaunch();
+    await guardReviewLaunch({ ...options, validate: async () => {
+      const status = await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target,
+        headSha: 'e'.repeat(40), lockTimeoutMs: 100 });
+      expect(status).toMatchObject({ status: 'launching', action: 'wait' });
+      expect(status.launch).toBeUndefined();
+    }, run: async () => {
+      expect(await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target, headSha, lockTimeoutMs: 100 }))
+        .toMatchObject({ status: 'running', action: 'wait', launch: { attempt: 1, round: 1, headSha } });
+      return completion;
+    } });
+  });
+
   it('reports a launch that holds the target as running, then its completed report as awaiting admission', async () => {
     // A resumed council keeps the exited original claimant on record; only the target lock shows it is alive.
     const options = await abandonedLaunch();

@@ -436,6 +436,10 @@ Guarded launches leave unrelated telemetry in the outbox for
 `rcl telemetry flush`; startup delivery cannot delay this acknowledgment or
 acquire another target lock while the launch owns its target.
 
+A marker bound to the current lock acquisition distinguishes retry preflight
+from an abandoned pending record. It clears when that invocation registers or
+resumes its council; the original claim and process identity stay unchanged.
+
 | Status | Meaning | Exit |
 | --- | --- | --- |
 | `launching` | The CLI accepted a convergence launch and holds the target during credential/config/diff preparation, before a pending round is registered | 0 |

@@ -109,6 +109,7 @@ import {
 } from './converge/run-state.js';
 import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
 import { withNativeTarget } from './converge/target-ownership.js';
+import { withLaunchPreflight } from './converge/launch-phase.js';
 import { guardReviewLaunch, ReviewCouncilInterrupted, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions,
   type OrdinaryCheckpoint } from './converge/launch-guard.js';
 import { selectCurrentRecoveredProduction, type RecoveredProduction } from './converge/recovered-production.js';
@@ -2263,13 +2264,13 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       if (!context) throw new ReviewLaunchRefused('target_required', 'A guarded launch requires --converge-target.');
       const common = await resolveGitCommonDir();
       const requestVersion = opts.startOver ? await freshReviewRequestVersion(common, context.target) : undefined;
-      return await withNativeTarget(common, context.target, async ownership => {
+      return await withNativeTarget(common, context.target, ownership => withLaunchPreflight(ownership, common, context.target, async () => {
         if (opts.startOver && await freshReviewRequestVersion(common, context.target) !== requestVersion) {
           throw new ReviewLaunchRefused('fresh_review_request_changed',
             'Another launch handled the pending fresh request; inspect its outcome before requesting another cycle.');
         }
         await runReview(target, { ...opts, launchOwnership: ownership });
-      }, { lockTimeoutMs: 5_000 });
+      }), { lockTimeoutMs: 5_000 });
     }
     if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined || opts.retryReport !== undefined ||
       opts.maxAttempts !== undefined || opts.maxRounds !== undefined || opts.maxSliceMinutes !== undefined)) {

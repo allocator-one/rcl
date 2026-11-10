@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { assertNoPendingFreshReview, freshReviewCompletionPending, freshReviewRequestVersion, prepareFreshReview, finishFreshReview, verifyReviewCycle } from './fresh-review.js';
 import type { ReviewCycleRemote } from './review-cycle.js';
 import { assertNativeTargetOwnership, withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
+import { finishLaunchPreflight, withLaunchPreflight } from './launch-phase.js';
 import { RegistryCleanupError } from '../coordination/registry-lock.js';
 import { convergeAttemptStatePath } from './attempt-budget.js';
 import { realpath } from 'node:fs/promises';
@@ -356,13 +357,13 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Gu
   }
   let completed: GuardedLaunchClaim | undefined;
   try {
-    return await withNativeTarget(options.gitCommonDir, options.target, async ownership => {
+    return await withNativeTarget(options.gitCommonDir, options.target, ownership => withLaunchPreflight(ownership, options.gitCommonDir, options.target, async () => {
       if (options.startOver && await freshReviewRequestVersion(options.gitCommonDir, options.target) !== requestVersion) {
         refuse('fresh_review_request_changed', 'Another launch handled the pending fresh request; inspect its outcome before requesting another cycle.');
       }
       completed = await guardReviewLaunchOwned(options, ownership);
       return completed;
-    }, { lockTimeoutMs: 5_000 });
+    }), { lockTimeoutMs: 5_000 });
   } catch (error) {
     if (!(error instanceof RegistryCleanupError) || !completed || error.result !== completed) throw error;
     completed.warning = `Attempt ${completed.attempt}/${completed.cap} is durably recorded; target lock cleanup failed. Do not repeat the claim: ${error.message}`;
@@ -413,6 +414,7 @@ async function resumeInterruptedOrdinary(options: GuardedLaunchOptions, ownershi
   // pending-recovery path bind that identity. This guard holds the native
   // target lock for the whole run, which excludes a concurrent resumer.
   state.lastLaunch = previous;
+  await finishLaunchPreflight(ownership, options.gitCommonDir, options.target);
   const context = { target: options.target, round: previous.round, attempt: previous.attempt,
     ...(state.cycle ? { cycleId: state.cycle.id } : {}) };
   let failure: { error: unknown } | undefined;
@@ -586,6 +588,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         }
       };
       await persistLaunch();
+      await finishLaunchPreflight(ownership, options.gitCommonDir, options.target);
       try {
         if (!claimed.preclaimed) await options.onClaim?.(claimed);
         const context = { target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt,
