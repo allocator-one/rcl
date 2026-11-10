@@ -55,7 +55,8 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
     await completedRound(dir, 'allocator-one/allocator-one#17256');
 
     expect(await inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).toMatchObject({
-      status: 'not_launched', action: 'launch' });
+      target: 'allocator-one/allocator-one#17256', requestedTarget: slug, status: 'completed',
+      launch: { runId: completion.runId } });
     expect(await inspectRoundLiveness({ gitCommonDir: dir, target: forms['pull request URL'], headSha })).toMatchObject({
       target: 'allocator-one/allocator-one#17256', status: 'completed', launch: { runId: completion.runId } });
   });
@@ -97,6 +98,14 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
     await completedRound(dir, '17256');
 
     expect(await inspectRoundLiveness({ gitCommonDir: dir, target: '17256', headSha })).toMatchObject({ status: 'completed' });
+  });
+
+  it('does not read another pull request\'s owner/repo#N round for a slug', async () => {
+    const dir = await commonDir();
+    await completedRound(dir, 'allocator-one/allocator-one#17257');
+
+    expect(await inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).toMatchObject({
+      target: slug, status: 'not_launched' });
   });
 
   it('keeps every other key as its own and only candidate', () => {

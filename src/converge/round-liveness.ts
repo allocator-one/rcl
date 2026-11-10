@@ -3,7 +3,7 @@ import type { GuardedLaunchState } from './launch-record.js';
 import { inspectProcessIdentity } from './process-identity.js';
 import { loadConvergeRunState, type ConvergeRunState } from './run-state.js';
 import { withNativeTarget } from './target-ownership.js';
-import { convergeTargetCandidates, isUnsupportedConvergeTargetForm, UnsupportedConvergeTargetForm } from './target-forms.js';
+import { convergeTargetCandidates, isUnsupportedConvergeTargetForm, recordedReferenceKeys, UnsupportedConvergeTargetForm } from './target-forms.js';
 
 /**
  * Whether a converge round is still being worked on (RCL-232).
@@ -142,17 +142,20 @@ function recordedAt(liveness: RoundLiveness): string | undefined {
  * Classify the target's latest round without changing native state, attempts, or reports.
  *
  * A pull request named as `owner/repo#N` or by URL also reads the other keys
- * its rounds launch under (`<repo>-<N>`, `owner/repo#N`); the key with the latest record answers, and
- * `requestedTarget` says what the caller asked (RCL-235).
+ * its rounds launch under (`<repo>-<N>`, `owner/repo#N`), and a `<repo>-<N>`
+ * slug also reads an `owner/repo#N` key the repository recorded; the key with
+ * the latest record answers, and `requestedTarget` says what the caller asked
+ * (RCL-235).
  */
 export async function inspectRoundLiveness(options: RoundLivenessOptions): Promise<RoundLiveness> {
-  const { key, aliases } = convergeTargetCandidates(options.target);
+  const { key, aliases: derived } = convergeTargetCandidates(options.target);
+  const aliases = [...derived, ...await recordedReferenceKeys(options.gitCommonDir, key)];
   const literal = await inspectTargetLiveness({ ...options, target: key });
   const answers = [literal, ...await Promise.all(aliases.map(alias => inspectTargetLiveness({ ...options, target: alias })))];
   const recorded = answers.filter(answer => recordedAt(answer) !== undefined)
     .sort((a, b) => recordedAt(b)!.localeCompare(recordedAt(a)!));
   if (recorded.length === 0 && isUnsupportedConvergeTargetForm(key)) throw new UnsupportedConvergeTargetForm(key);
-  const answer = recorded[0] ?? answers.at(aliases.length > 0 ? 1 : 0)!;
+  const answer = recorded[0] ?? answers.at(derived.length > 0 ? 1 : 0)!;
   return answer.target === key ? answer : { ...answer, requestedTarget: key };
 }
 

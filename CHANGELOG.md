@@ -7,7 +7,8 @@
   `not_launched` for a round that was recorded under the `<repo>-<N>` slug, so
   a lane using that form would relaunch a live round or wait on a dead one. A
   pull request reference now also reads the slug and `owner/repo#N` keys and
-  answers from the one with the latest launch; `--json` adds `requestedTarget`
+  answers from the one with the latest launch (a slug likewise reads an
+  `owner/repo#N` key the repository recorded); `--json` adds `requestedTarget`
   when the answer came from another key than the one passed. A reference that
   names no key (`#N`, a bare number, an issue URL) is refused with
   `converge_target_form_unsupported` instead of reading as not launched.

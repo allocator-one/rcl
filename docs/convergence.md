@@ -444,8 +444,10 @@ target lock from preflight until it writes its terminal record, so:
 `--target` takes the key the round launched under. A pull request named as
 `owner/repo#N` or by its URL also reads the other keys it launches under, the
 `<repo>-<N>` slug and `owner/repo#N`, and the key with the latest launch
-answers; `target` in the output is the key read and `requestedTarget` the
-value passed. A reference that names no key (`#N`, a bare number, an issue
+answers; a `<repo>-<N>` slug likewise reads an `owner/repo#N` key the
+repository recorded. `target` in the output is the key read and
+`requestedTarget` the value passed. A git common dir holds one repository's
+pull requests, so a repository-only match is the same pull request. A reference that names no key (`#N`, a bare number, an issue
 URL, a malformed `owner/repo#`) is refused with
 `converge_target_form_unsupported` and exit 3 instead of reporting
 `not_launched`, unless a round is recorded under that exact key.
