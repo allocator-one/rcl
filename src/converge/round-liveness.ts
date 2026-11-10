@@ -149,8 +149,14 @@ function recordedAt(liveness: RoundLiveness): string | undefined {
  */
 export async function inspectRoundLiveness(options: RoundLivenessOptions): Promise<RoundLiveness> {
   const { key, aliases: derived } = convergeTargetCandidates(options.target);
-  const aliases = [...derived, ...await recordedReferenceKeys(options.gitCommonDir, key)];
   const literal = await inspectTargetLiveness({ ...options, target: key });
+  // A key that already holds a record answers even when the other recorded keys cannot be listed; with no record
+  // a failed listing is unknown state, never a miss, so it throws.
+  const discovered = await recordedReferenceKeys(options.gitCommonDir, key).catch((error: unknown) => {
+    if (recordedAt(literal) === undefined) throw error;
+    return [] as string[];
+  });
+  const aliases = [...derived, ...discovered];
   const answers = [literal, ...await Promise.all(aliases.map(alias => inspectTargetLiveness({ ...options, target: alias })))];
   const recorded = answers.filter(answer => recordedAt(answer) !== undefined)
     .sort((a, b) => recordedAt(b)!.localeCompare(recordedAt(a)!));

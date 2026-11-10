@@ -125,6 +125,15 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
     await expect(inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).rejects.toThrow('converge_state_unreadable');
   });
 
+  it('still answers a slug that holds its own round when another state file cannot be read', async () => {
+    const dir = await commonDir();
+    await completedRound(dir, slug);
+    await writeFile(join(dir, 'rcl-converge-runs', `${'x'.repeat(48)}-${'0'.repeat(16)}.json`), 'not json'); // a cut name is a candidate for any slug
+
+    expect(await inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).toMatchObject({
+      target: slug, status: 'completed' });
+  });
+
   it('fails a slug status instead of reporting a miss when the recorded keys cannot be listed', async () => {
     const dir = await commonDir();
     await writeFile(join(dir, 'rcl-converge-runs'), 'not a directory'); // a listing error that is not a missing directory
