@@ -10,6 +10,16 @@
   tarball without it. npm applies it to registry installs; a local tarball
   install ignores it, see AGENTS.md.
 
+## 4.5.40 - 2026-11-10
+
+- Name the problem when `rcl evidence retriage-finding --reason-file` points at a
+  directory (RCL-217). An empty path, which is what an unset variable becomes in
+  a launcher run under `env -i`, resolves to the working directory, and a
+  directory stdin behind `/dev/stdin` is one too; both surfaced as a bare
+  `EISDIR: illegal operation on a directory, read`. The refusal now says the
+  path must be a regular file and that rcl reads no stdin. `--submit` never
+  read stdin.
+
 ## 4.5.39 - 2026-11-10
 
 - Accept a group-writable recovery-lock ancestor when its group is the owner's
@@ -36,14 +46,6 @@
   or NIS source, an ACL, world-write, a root-owned group-writable directory
   (also for a root caller) and the 0700 lock root are refused as before. The
   error now names the offending path, its owner and mode, and the fix.
-
-- Name the problem when `rcl evidence retriage-finding --reason-file` points at a
-  directory (RCL-217). An empty path, which is what an unset variable becomes in
-  a launcher run under `env -i`, resolves to the working directory, and a
-  directory stdin behind `/dev/stdin` is one too; both surfaced as a bare
-  `EISDIR: illegal operation on a directory, read`. The refusal now says the
-  path must be a regular file and that rcl reads no stdin. `--submit` never
-  read stdin.
 
 ## 4.5.38 - 2026-11-10
 
