@@ -339,7 +339,10 @@ the exception (below).
 `spec-compliance` are dropped from default/`all` resolution when no rules or
 spec content is found — running them without content wastes a model call and
 invites hallucinated violations. If either is requested by name without its
-content, it still runs but emits a warning (it is not silently skipped).
+content, it still runs but emits a warning (it is not silently skipped). The
+opt-in `cross-context-coupling` lens is stricter: requested by name without a
+`couplingLens` section it is refused with an error, since without declared
+contexts it has no candidates and could only say nothing (RCL-242).
 
 **Elevation.** See the CONSENSUS_V2_SPEC as-built addendum. Elevation
 resolves disagreements up to the most severe level supported by ≥2 distinct

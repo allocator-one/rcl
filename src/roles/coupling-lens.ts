@@ -184,15 +184,25 @@ ${severityPhrase(config)}`,
 const CANDIDATES_LABEL = 'scan candidates';
 
 /**
+ * The most candidates listed per chunk. The notes sit outside the secured-diff
+ * byte budget, so the listing is bounded on its own (RCL-242); the system
+ * prompt still states the scan's full count.
+ */
+export const MAX_CANDIDATE_NOTES = 40;
+
+/**
  * The scan's candidates for one chunk, for the user prompt's untrusted
  * section: filenames come from the pull request, so they never reach the
- * system prompt. Empty when the scan found nothing.
+ * system prompt. Empty when the scan found nothing; capped at
+ * `MAX_CANDIDATE_NOTES` lines plus a count of the rest.
  */
 export function couplingCandidateNotes(files: CouplingFile[], config: CouplingLensConfig): UntrustedNote[] {
   const candidates = detectCrossContextCoupling(files, config);
   if (candidates.length === 0) return [];
-  const lines = candidates.map(
+  const lines = candidates.slice(0, MAX_CANDIDATE_NOTES).map(
     (c) => `- ${JSON.stringify(c.file)}:${c.line} — ${c.from} → ${c.to} (references ${JSON.stringify(c.reference)})`
   );
+  const omitted = candidates.length - MAX_CANDIDATE_NOTES;
+  if (omitted > 0) lines.push(`… and ${omitted} more candidate(s) not listed`);
   return [{ label: CANDIDATES_LABEL, text: lines.join('\n') }];
 }

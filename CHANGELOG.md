@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Refuse the `cross-context-coupling` lens when it is requested by name without
+  a `couplingLens` section, instead of warning and running a seat with no
+  contexts that could only say nothing (RCL-242).
+- Cap the scan candidates the lens lists per chunk at 40 with a count of the
+  rest, so the untrusted notes, which sit outside the secured-diff byte budget,
+  stay bounded (RCL-242).
+
 ## 4.5.45 - 2026-11-10
 
 - Add the opt-in `cross-context-coupling` lens (RCL-49). With a `couplingLens`
