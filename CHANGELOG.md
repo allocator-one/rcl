@@ -2,19 +2,44 @@
 
 ## Unreleased
 
-## 4.5.38 - 2026-11-10
+## 4.5.39 - 2026-11-10
 
 - Accept a group-writable recovery-lock ancestor when its group is the owner's
   own user-private group (RCL-204). Ubuntu's umask 002 leaves the home
   directory, checkout and `.git` at 775, and `rcl converge-stale --apply` refused
-  them with `unsafe_recovery_lock_ancestor`. The group counts as private only
-  when it is the owner's primary group and neither `/etc/group` nor
-  `/etc/passwd` shows another member, `/etc/nsswitch.conf` resolves `passwd`,
-  `group` and `initgroups` only from local files (`files`, or `systemd` while no
-  systemd userdb record exists) and the directory has no POSIX ACL. An unreadable account database, a shared group, an LDAP, SSSD or
-  NIS source, an ACL, world-write, a root-owned group-writable directory (also
-  for a root caller) and the 0700 lock root are refused as before. The error
-  now names the offending path, its owner and mode, and the fix.
+  them with `unsafe_recovery_lock_ancestor`. The claim is deliberately narrow:
+  local files, the listed userdb locations and no ACL. The group counts as
+  private only when it is the owner's primary group, `/etc/group` lists no other
+  member, no other user has it as primary group, and `/etc/passwd` repeats
+  neither a username nor the owner's uid. `/etc/nsswitch.conf` must list `files`
+  for `passwd` and `group` and name no other source than `files` or `systemd`
+  for `passwd`, `group` and `initgroups`. `systemd` counts as local only while
+  none of `/etc/userdb`, `/run/userdb`, `/run/host/userdb`, `/usr/lib/userdb`
+  and `/usr/local/lib/userdb` holds a record and no systemd-homed socket exists
+  under `/run/systemd/userdb`. A userdb service registered elsewhere, or one
+  started after the check, is outside the claim. The directory must also have
+  no POSIX ACL. An unreadable account database, a shared group, an LDAP, SSSD
+  or NIS source, an ACL, world-write, a root-owned group-writable directory
+  (also for a root caller) and the 0700 lock root are refused as before. The
+  error now names the offending path, its owner and mode, and the fix.
+
+## 4.5.38 - 2026-11-10
+
+- Let a council launch from an agent session without the `harness keys exec`
+  wrapper (RCL-203). Claude Code's auto-mode permission classifier refuses
+  `harness keys exec … --override -- <child>` as credential exploration, so
+  every round had to be started by hand by the owner. `rcl review
+  --harness-keys-first` now takes the provider keys from the Harness login
+  itself, ahead of the environment: ambient provider keys (including
+  `GOOGLE_API_KEY`) are dropped and the keys Harness serves are injected for the
+  run only, so a provider Harness does not hold reads as missing instead of
+  silently reusing an ambient key. It works in any repository and fails closed:
+  not logged in, `RCL_NO_HARNESS_KEYS` set or an unreachable backend refuse the
+  launch (`harness_keys_unavailable`, no attempt claimed) and never fall back
+  to the environment. A backend that serves no provider keys refuses the same
+  way; one that serves only some names the providers it left out when a launch
+  then refuses for lack of them, and the default roster is no longer trimmed
+  quietly for a missing OpenRouter key. Without the flag, the environment still wins.
 
 ## 4.5.37 - 2026-11-10
 

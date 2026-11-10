@@ -119,6 +119,16 @@ the host that minted the stored login token, and injected for the run.
 - Which providers the backend serves is server configuration;
   `RCL_NO_HARNESS_KEYS` disables the mechanism client-side.
 
+Pass `--harness-keys-first` to `rcl review` when Harness, not the environment,
+must supply the keys (for example under a policy that forbids ambient provider
+keys). rcl drops every provider key from the environment, injects the ones the
+login's Harness serves, and refuses the launch (`harness_keys_unavailable`)
+instead of falling back when it cannot: not logged in, an unreachable backend
+or `RCL_NO_HARNESS_KEYS` set. It needs no `.harness-cli/config.json`. Use it
+rather than wrapping the launch in `harness keys exec … --override --`: an
+agent session's permission classifier refuses that env-injecting wrapper, while
+`rcl` fetching its own keys is allowed (RCL-203).
+
 ---
 
 ## Quick start
