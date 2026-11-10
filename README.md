@@ -478,7 +478,7 @@ commands are documented in
 | `rcl converge-stale` | Audited disposition of a healthy or reconciled delivered-hard-failure report that became stale before admission |
 | `rcl converge-gap` | Audited record of one evidenced missing terminal report |
 | `rcl converge-close-fresh` | Audited close of a fresh-review operation whose launch died before writing any report |
-| `rcl converge-status` | Report whether the latest round is running, dead, not launched or finished, without changing state; exit 6 when nothing will finish it (`--wait` polls until it does or dies) |
+| `rcl converge-status` | Report whether the latest round is launching, running, dead, not launched or finished, without changing state; exit 6 when nothing will finish it (`--wait` polls until it does or dies) |
 | `rcl pr-snapshot` | Capture a pull request's live state for a review process that holds no GitHub credentials (`rcl review --pr-snapshot`) |
 | `rcl converge-rejected` | Audited disposition of a report rejected locally before delivery |
 | `rcl converge-attempt` | Claim one durable attempt; recovered-v3 continuation hands the exact claim to its guarded producer with `--attempt` |

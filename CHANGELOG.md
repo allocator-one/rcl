@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.5.37 - 2026-11-10
+
+- Report `launching` while an accepted convergence review prepares credentials,
+  configuration and its diff, before the round registers (RCL-236). Native
+  target ownership now covers that startup window, and `converge-status --wait`
+  waits through it. A PR-bound patch with a convergence target uses guarded
+  launch when no attempt was explicitly preclaimed, so its pending and completed
+  `lastLaunch` records remain visible outside review cycles too.
+
 ## 4.5.36 - 2026-11-10
 
 - Resolve the temporary directories in `test/converge/fresh-review-close.test.ts`

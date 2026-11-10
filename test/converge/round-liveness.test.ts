@@ -8,6 +8,7 @@ import { convergeAttemptStatePath } from '../../src/converge/attempt-budget.js';
 import { guardReviewLaunch, ReviewCouncilInterrupted, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
 import { convergeRunStatePath } from '../../src/converge/run-state.js';
 import { inspectRoundLiveness, waitForRoundOutcome } from '../../src/converge/round-liveness.js';
+import { withNativeTarget } from '../../src/converge/target-ownership.js';
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -61,12 +62,52 @@ function runningLaunch(options: GuardedLaunchOptions) {
 }
 
 describe('converge round liveness (RCL-232)', () => {
+  it('keeps an accepted slug launch visible ahead of an old completed reference alias', async () => {
+    const options = await launchOptions();
+    const reference = 'owner/rcl#42', slug = 'rcl-42';
+    await guardReviewLaunch({ ...options, target: reference, run: async () => completion });
+    await withNativeTarget(options.gitCommonDir, slug, async () => {
+      expect(await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir,
+        target: reference, headSha, lockTimeoutMs: 1000 }))
+        .toMatchObject({ target: slug, requestedTarget: reference, status: 'launching', action: 'wait' });
+    });
+  });
+
+  it('keeps waiting during accepted preflight before the first round registers', async () => {
+    const options = await launchOptions();
+    await withNativeTarget(options.gitCommonDir, target, async () => {
+      let time = 0;
+      const sleep = vi.fn(async (ms: number) => { time += ms; });
+      const status = await waitForRoundOutcome({ gitCommonDir: options.gitCommonDir, target, headSha,
+        lockTimeoutMs: 50, timeoutMs: 100, intervalMs: 100, sleep, now: () => time });
+      expect(status).toMatchObject({ status: 'launching', action: 'wait' });
+      expect(status.launch).toBeUndefined();
+      expect(sleep).toHaveBeenCalledTimes(1);
+    });
+    expect(await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target, headSha }))
+      .toMatchObject({ status: 'not_launched', action: 'launch' });
+  });
+
   it('reports a pending round whose process exited as dead, so the caller stops waiting', async () => {
     const options = await abandonedLaunch();
 
     const status = await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target, headSha });
 
     expect(status).toMatchObject({ status: 'dead', action: 'resume', launch: { attempt: 1, round: 1, headSha } });
+  });
+
+  it('keeps an abandoned pending record out of retry preflight, then reports its resumed council', async () => {
+    const options = await abandonedLaunch();
+    await guardReviewLaunch({ ...options, validate: async () => {
+      const status = await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target,
+        headSha: 'e'.repeat(40), lockTimeoutMs: 100 });
+      expect(status).toMatchObject({ status: 'launching', action: 'wait' });
+      expect(status.launch).toBeUndefined();
+    }, run: async () => {
+      expect(await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target, headSha, lockTimeoutMs: 100 }))
+        .toMatchObject({ status: 'running', action: 'wait', launch: { attempt: 1, round: 1, headSha } });
+      return completion;
+    } });
   });
 
   it('reports a launch that holds the target as running, then its completed report as awaiting admission', async () => {
@@ -90,6 +131,20 @@ describe('converge round liveness (RCL-232)', () => {
 
     expect(await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target, headSha: 'e'.repeat(40) }))
       .toMatchObject({ status: 'not_launched', action: 'launch' });
+  });
+
+  it('describes the registered running round when another head is requested', async () => {
+    const options = await launchOptions();
+    const { launch, running, finish } = runningLaunch(options);
+    await running;
+    try {
+      expect(await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target,
+        headSha: 'e'.repeat(40), lockTimeoutMs: 500 }))
+        .toMatchObject({ status: 'running', action: 'wait', launch: { attempt: 1, round: 1, headSha } });
+    } finally {
+      finish('complete');
+      await launch;
+    }
   });
 
   it('stops waiting as soon as a running round dies', async () => {

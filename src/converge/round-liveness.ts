@@ -1,5 +1,6 @@
 import { loadConvergeAttemptState } from './attempt-budget.js';
 import type { GuardedLaunchState } from './launch-record.js';
+import { isLaunchPreflight } from './launch-phase.js';
 import { inspectProcessIdentity } from './process-identity.js';
 import { loadConvergeRunState, type ConvergeRunState } from './run-state.js';
 import { withNativeTarget } from './target-ownership.js';
@@ -14,7 +15,7 @@ import { convergeTargetCandidates, isUnsupportedConvergeTargetForm, UnsupportedC
  * claimant. A pending record with a free lock means the launching process is
  * gone: nothing will ever finish that round, and a caller must not wait on it.
  */
-export type RoundLivenessStatus = 'running' | 'dead' | 'not_launched' | 'completed' | 'failed' | 'idle';
+export type RoundLivenessStatus = 'launching' | 'running' | 'dead' | 'not_launched' | 'completed' | 'failed' | 'idle';
 
 /** What the caller does next: keep waiting, resume the dead launch, launch the round, read the report, or inspect. */
 export type RoundLivenessAction = 'wait' | 'resume' | 'launch' | 'process_report' | 'inspect' | 'none';
@@ -45,7 +46,7 @@ export interface RoundLiveness {
 export interface RoundLivenessOptions {
   gitCommonDir: string;
   target: string;
-  /** The head the caller expects a round for; a latest launch at another head is reported as not launched. */
+  /** Expected head; a live round reports its actual head, while a free target at another head reads as not launched. */
   headSha?: string;
   /** How long to try for the target lock before reading a holder as a live review. */
   lockTimeoutMs?: number;
@@ -135,7 +136,7 @@ async function settledLiveness(target: string, headSha: string | undefined,
 /** The launch (or a held lock) the answer rests on; `idle` and a miss at the head are answers about nothing. */
 function recordedAt(liveness: RoundLiveness): string | undefined {
   if (liveness.launch) return liveness.launch.startedAt;
-  return liveness.status === 'running' ? '￿' : undefined;
+  return liveness.status === 'launching' || liveness.status === 'running' ? '￿' : undefined;
 }
 
 /**
@@ -168,13 +169,15 @@ async function inspectTargetLiveness(options: RoundLivenessOptions): Promise<Rou
   }
   // A live guarded review owns the target; describe its launch once it is recorded.
   const { launch } = await readLaunch(options.gitCommonDir, target).catch(() => ({ launch: undefined }));
-  const current = launch?.status === 'pending' && (options.headSha === undefined || launch.headSha === options.headSha);
-  return { target, status: 'running', action: 'wait', ...(current ? { launch: describeLaunch(launch) } : {}),
-    message: current ? `A review process holds the target and is working on ${label(launch)}.`
+  const registered = launch?.status === 'pending' && !await isLaunchPreflight(options.gitCommonDir, target);
+  return { target, status: registered ? 'running' : 'launching', action: 'wait', ...(registered ? { launch: describeLaunch(launch) } : {}),
+    message: registered ? `A review process holds the target and is working on ${label(launch)}.` +
+      (options.headSha !== undefined && launch.headSha !== options.headSha
+        ? ' The running round is at a different head from the one requested.' : '')
       : 'A review process holds the target and has not yet recorded its launch.' };
 }
 
-/** Poll until the round is no longer running or the timeout passes; a dead round returns at once. */
+/** Poll through launch preparation and execution; a terminal or dead round returns at once. */
 export async function waitForRoundOutcome(options: RoundOutcomeWaitOptions): Promise<RoundLiveness> {
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
@@ -182,7 +185,7 @@ export async function waitForRoundOutcome(options: RoundOutcomeWaitOptions): Pro
   const deadline = now() + options.timeoutMs;
   for (;;) {
     const liveness = await inspectRoundLiveness(options);
-    if (liveness.status !== 'running' || now() >= deadline) return liveness;
+    if (!['launching', 'running'].includes(liveness.status) || now() >= deadline) return liveness;
     await sleep(Math.max(0, Math.min(interval, deadline - now())));
   }
 }
