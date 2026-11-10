@@ -739,7 +739,7 @@ program
   .description('Report whether the target\'s latest converge round is launching, running, dead, not launched or finished, ' +
     'without changing any state. Exit 6 means the round is abandoned: its launching process is gone and nothing will finish it (RCL-232)')
   .requiredOption('--target <target>')
-  .option('--head <sha>', 'The head a round is expected for; a latest launch at another head reads as not launched')
+  .option('--head <sha>', 'The head a round is expected for; a live round reports its actual head')
   .option('--wait <minutes>', 'Keep polling while the round is launching or running, up to this many minutes; return as soon as it finishes or dies')
   .option('--interval <seconds>', 'Polling interval for --wait', '30')
   .option('--json')

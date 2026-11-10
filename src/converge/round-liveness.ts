@@ -45,7 +45,7 @@ export interface RoundLiveness {
 export interface RoundLivenessOptions {
   gitCommonDir: string;
   target: string;
-  /** The head the caller expects a round for; a latest launch at another head is reported as not launched. */
+  /** Expected head; a live round reports its actual head, while a free target at another head reads as not launched. */
   headSha?: string;
   /** How long to try for the target lock before reading a holder as a live review. */
   lockTimeoutMs?: number;
@@ -168,9 +168,11 @@ async function inspectTargetLiveness(options: RoundLivenessOptions): Promise<Rou
   }
   // A live guarded review owns the target; describe its launch once it is recorded.
   const { launch } = await readLaunch(options.gitCommonDir, target).catch(() => ({ launch: undefined }));
-  const current = launch?.status === 'pending' && (options.headSha === undefined || launch.headSha === options.headSha);
-  return { target, status: current ? 'running' : 'launching', action: 'wait', ...(current ? { launch: describeLaunch(launch) } : {}),
-    message: current ? `A review process holds the target and is working on ${label(launch)}.`
+  const registered = launch?.status === 'pending';
+  return { target, status: registered ? 'running' : 'launching', action: 'wait', ...(registered ? { launch: describeLaunch(launch) } : {}),
+    message: registered ? `A review process holds the target and is working on ${label(launch)}.` +
+      (options.headSha !== undefined && launch.headSha !== options.headSha
+        ? ' The running round is at a different head from the one requested.' : '')
       : 'A review process holds the target and has not yet recorded its launch.' };
 }
 

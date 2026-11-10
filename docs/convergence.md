@@ -455,6 +455,11 @@ URL, a malformed `owner/repo#`) is refused with
 `converge_target_form_unsupported` and exit 3 instead of reporting
 `not_launched`, unless a round is recorded under that exact key.
 
+A registered live round reports its actual `launch.headSha`, even when `--head`
+names another commit. It remains `running`: the different requested head does
+not make the existing round a pre-registration launch. Wait for the target to
+be free before launching a round for another head.
+
 `--wait <minutes>` polls every `--interval` seconds (30 by default) while the
 round is launching or running and returns as soon as it finishes or dies, so a caller can
 wait on that instead of on a report that may never arrive. For `dead`, rerun

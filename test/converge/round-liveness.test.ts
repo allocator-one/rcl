@@ -119,6 +119,20 @@ describe('converge round liveness (RCL-232)', () => {
       .toMatchObject({ status: 'not_launched', action: 'launch' });
   });
 
+  it('describes the registered running round when another head is requested', async () => {
+    const options = await launchOptions();
+    const { launch, running, finish } = runningLaunch(options);
+    await running;
+    try {
+      expect(await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target,
+        headSha: 'e'.repeat(40), lockTimeoutMs: 500 }))
+        .toMatchObject({ status: 'running', action: 'wait', launch: { attempt: 1, round: 1, headSha } });
+    } finally {
+      finish('complete');
+      await launch;
+    }
+  });
+
   it('stops waiting as soon as a running round dies', async () => {
     const options = await launchOptions();
     const { launch, running, finish } = runningLaunch(options);
