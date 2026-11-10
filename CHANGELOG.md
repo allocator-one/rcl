@@ -11,7 +11,9 @@
   local files, the listed userdb locations and no ACL. The group counts as
   private only when it is the owner's primary group, `/etc/group` lists no other
   member, no other user has it as primary group, and `/etc/passwd` repeats
-  neither a username nor the owner's uid. `/etc/nsswitch.conf` must list `files`
+  neither a username nor the owner's uid. Ids compare as numbers (`01000` is
+  `1000`), and a row with an id that is not plain decimal is refused.
+  `/etc/nsswitch.conf` must list `files`
   for `passwd` and `group` and name no other source than `files` or `systemd`
   for `passwd`, `group` and `initgroups`. `systemd` counts as local only while
   none of `/etc/userdb`, `/run/userdb`, `/run/host/userdb`, `/usr/lib/userdb`

@@ -105,6 +105,19 @@ it.each([
   await expect(isUserPrivateGroup(1000, 1000, files(item.passwd, 'ann:x:1000:'), noUserdb)).resolves.toBe(false);
 });
 
+it.each([
+  { name: 'another user whose primary gid is a zero-padded spelling', passwd: 'ann:x:1000:1000::/h:/bin/sh\nbob:x:1001:01000::/h:/bin/sh', group: 'ann:x:1000:' },
+  { name: 'a second account whose uid is a zero-padded spelling', passwd: 'ann:x:1000:1000::/h:/bin/sh\nbob:x:01000:1000::/h:/bin/sh', group: 'ann:x:1000:' },
+  { name: 'a passwd row with a non-numeric id', passwd: 'ann:x:1000:1000::/h:/bin/sh\nbob:x:abc:1000::/h:/bin/sh', group: 'ann:x:1000:' },
+  { name: 'a group row with a non-numeric gid', passwd: 'ann:x:1000:1000::/h:/bin/sh', group: 'ann:x:1000:\nmal:x:1x:bob' },
+])('refuses $name', async item => {
+  await expect(isUserPrivateGroup(1000, 1000, files(item.passwd, item.group), noUserdb)).resolves.toBe(false);
+});
+
+it('matches the owner and group across zero-padded spellings of the same id', async () => {
+  await expect(isUserPrivateGroup(1000, 1000, files('ann:x:01000:001000::/h:/bin/sh', 'ann:x:01000:'), noUserdb)).resolves.toBe(true);
+});
+
 it('never treats the root account or group 0 as a user-private group', async () => {
   await expect(isUserPrivateGroup(0, 0, files('root:x:0:0:root:/root:/bin/bash', 'root:x:0:'), noUserdb)).resolves.toBe(false);
   await expect(isUserPrivateGroup(1000, 0, files('ann:x:1000:0::/h:/bin/sh', 'root:x:0:'), noUserdb)).resolves.toBe(false);

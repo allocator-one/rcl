@@ -65,7 +65,8 @@ async function usesOnlyLocalAccounts(read: AccountReader, list: DirectoryLister)
  * locations, and answers false when any is unreadable, when `files` is not
  * listed for passwd and group or another source answers a lookup, when a userdb
  * record or a systemd-homed socket exists, when a username or the owner's uid
- * appears twice in /etc/passwd, when the owner is not shown and for root or group 0.
+ * appears twice in /etc/passwd, when an id is not plain decimal (ids compare as
+ * numbers, so 01000 is 1000), when the owner is not shown and for root or group 0.
  */
 export async function isUserPrivateGroup(uid: number, gid: number, read: AccountReader = path => readFile(path, 'utf8'),
   list: DirectoryLister = path => readdir(path)): Promise<boolean> {
@@ -73,11 +74,14 @@ export async function isUserPrivateGroup(uid: number, gid: number, read: Account
   try {
     if (!await usesOnlyLocalAccounts(read, list)) return false;
     const passwd = await accountRows(read, '/etc/passwd'); const groups = await accountRows(read, '/etc/group');
-    const owner = passwd.find(row => row[2] === String(uid));
-    if (new Set(passwd.map(row => row[0])).size !== passwd.length || passwd.filter(row => row[2] === String(uid)).length > 1) return false;
-    const matching = groups.filter(row => row[2] === String(gid));
-    return owner !== undefined && owner[3] === String(gid) && matching.length > 0 &&
-      passwd.every(row => row[3] !== String(gid) || row[2] === String(uid)) &&
+    // Compare parsed ids: "01000" and "1000" name the same account or group; anything not plain decimal fails closed.
+    const id = (value: string | undefined): number => /^\d{1,10}$/.test(value ?? '') ? Number(value) : NaN;
+    if (passwd.some(row => Number.isNaN(id(row[2])) || Number.isNaN(id(row[3]))) || groups.some(row => Number.isNaN(id(row[2])))) return false;
+    const owner = passwd.find(row => id(row[2]) === uid);
+    if (new Set(passwd.map(row => row[0])).size !== passwd.length || passwd.filter(row => id(row[2]) === uid).length > 1) return false;
+    const matching = groups.filter(row => id(row[2]) === gid);
+    return owner !== undefined && id(owner[3]) === gid && matching.length > 0 &&
+      passwd.every(row => id(row[3]) !== gid || row === owner) &&
       matching.every(row => (row[3] ?? '').split(',').every(member => member === '' || member === owner[0]));
   } catch { return false; }
 }
