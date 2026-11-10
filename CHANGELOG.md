@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.38 - 2026-11-10
+
 - Let a council launch from an agent session without the `harness keys exec`
   wrapper (RCL-203). Claude Code's auto-mode permission classifier refuses
   `harness keys exec … --override -- <child>` as credential exploration, so
