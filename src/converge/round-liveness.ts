@@ -3,6 +3,7 @@ import type { GuardedLaunchState } from './launch-record.js';
 import { inspectProcessIdentity } from './process-identity.js';
 import { loadConvergeRunState, type ConvergeRunState } from './run-state.js';
 import { withNativeTarget } from './target-ownership.js';
+import { convergeTargetCandidates, isUnsupportedConvergeTargetForm, UnsupportedConvergeTargetForm } from './target-forms.js';
 
 /**
  * Whether a converge round is still being worked on (RCL-232).
@@ -19,7 +20,10 @@ export type RoundLivenessStatus = 'launching' | 'running' | 'dead' | 'not_launch
 export type RoundLivenessAction = 'wait' | 'resume' | 'launch' | 'process_report' | 'inspect' | 'none';
 
 export interface RoundLiveness {
+  /** The native target key the answer was read from. */
   target: string;
+  /** What the caller named, when that was a pull request reference standing for `target`. */
+  requestedTarget?: string;
   status: RoundLivenessStatus;
   action: RoundLivenessAction;
   message: string;
@@ -128,8 +132,31 @@ async function settledLiveness(target: string, headSha: string | undefined,
         'it awaits converge-report.' };
 }
 
-/** Classify the target's latest round without changing native state, attempts, or reports. */
+/** The launch (or a held lock) the answer rests on; `idle` and a miss at the head are answers about nothing. */
+function recordedAt(liveness: RoundLiveness): string | undefined {
+  if (liveness.launch) return liveness.launch.startedAt;
+  return liveness.status === 'launching' || liveness.status === 'running' ? '￿' : undefined;
+}
+
+/**
+ * Classify the target's latest round without changing native state, attempts, or reports.
+ *
+ * A pull request named as `owner/repo#N` or by URL also reads the other keys
+ * its rounds launch under (`<repo>-<N>`, `owner/repo#N`); the key with the latest record answers, and
+ * `requestedTarget` says what the caller asked (RCL-235).
+ */
 export async function inspectRoundLiveness(options: RoundLivenessOptions): Promise<RoundLiveness> {
+  const { key, aliases } = convergeTargetCandidates(options.target);
+  const literal = await inspectTargetLiveness({ ...options, target: key });
+  const answers = [literal, ...await Promise.all(aliases.map(alias => inspectTargetLiveness({ ...options, target: alias })))];
+  const recorded = answers.filter(answer => recordedAt(answer) !== undefined)
+    .sort((a, b) => recordedAt(b)!.localeCompare(recordedAt(a)!));
+  if (recorded.length === 0 && isUnsupportedConvergeTargetForm(key)) throw new UnsupportedConvergeTargetForm(key);
+  const answer = recorded[0] ?? answers.at(aliases.length > 0 ? 1 : 0)!;
+  return answer.target === key ? answer : { ...answer, requestedTarget: key };
+}
+
+async function inspectTargetLiveness(options: RoundLivenessOptions): Promise<RoundLiveness> {
   const target = options.target.trim();
   try {
     return await withNativeTarget(options.gitCommonDir, target, async () => {

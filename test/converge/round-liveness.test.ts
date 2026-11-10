@@ -62,6 +62,17 @@ function runningLaunch(options: GuardedLaunchOptions) {
 }
 
 describe('converge round liveness (RCL-232)', () => {
+  it('keeps an accepted slug launch visible ahead of an old completed reference alias', async () => {
+    const options = await launchOptions();
+    const reference = 'owner/rcl#42', slug = 'rcl-42';
+    await guardReviewLaunch({ ...options, target: reference, run: async () => completion });
+    await withNativeTarget(options.gitCommonDir, slug, async () => {
+      expect(await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir,
+        target: reference, headSha, lockTimeoutMs: 1000 }))
+        .toMatchObject({ target: slug, requestedTarget: reference, status: 'launching', action: 'wait' });
+    });
+  });
+
   it('keeps waiting during accepted preflight before the first round registers', async () => {
     const options = await launchOptions();
     await withNativeTarget(options.gitCommonDir, target, async () => {
