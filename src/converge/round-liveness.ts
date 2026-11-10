@@ -151,8 +151,10 @@ export async function inspectRoundLiveness(options: RoundLivenessOptions): Promi
   const { key, aliases: derived } = convergeTargetCandidates(options.target);
   const literal = await inspectTargetLiveness({ ...options, target: key });
   // A failed listing or read is unknown state, never a miss and never a reason to trust the key that was found, so it throws.
-  const discovered = await recordedReferenceKeys(options.gitCommonDir, key);
-  const aliases = [...derived, ...discovered];
+  // A pull request reference looks its recorded keys up through its slug, which names the repository and number
+  // without the casing of the owner or repository the caller typed.
+  const discovered = await recordedReferenceKeys(options.gitCommonDir, derived[0] ?? key);
+  const aliases = [...new Set([...derived, ...discovered])].filter(alias => alias !== key);
   const answers = [literal, ...await Promise.all(aliases.map(alias => inspectTargetLiveness({ ...options, target: alias })))];
   const recorded = answers.filter(answer => recordedAt(answer) !== undefined)
     .sort((a, b) => recordedAt(b)!.localeCompare(recordedAt(a)!));

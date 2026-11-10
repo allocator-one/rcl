@@ -69,6 +69,16 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
       .toMatchObject({ target: 'rcl-ios-9', status: 'completed' });
   });
 
+  it('reads an owner/repo#N round recorded with another casing than the reference or URL asked for', async () => {
+    const dir = await commonDir();
+    await completedRound(dir, 'allocator-one/allocator-one#17256');
+
+    for (const requested of ['Allocator-One/Allocator-One#17256', 'https://github.com/Allocator-One/Allocator-One/pull/17256']) {
+      expect(await inspectRoundLiveness({ gitCommonDir: dir, target: requested, headSha })).toMatchObject({
+        target: 'allocator-one/allocator-one#17256', requestedTarget: requested, status: 'completed' });
+    }
+  });
+
   it('answers with the latest record when a pull request holds rounds under both spellings', async () => {
     const dir = await commonDir();
     await completedRound(dir, 'allocator-one/allocator-one#17256');
