@@ -29,8 +29,11 @@ export const RoleConfigSchema = z.object({
 });
 
 const CouplingContextSchema = z.object({
-  /** Short label used in findings and in `neutral` / `allow`. */
-  name: z.string().min(1),
+  /**
+   * Short label used in findings and in `neutral` / `allow`. It reaches the
+   * lens's system prompt, so it is a plain label, never free text.
+   */
+  name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/, 'a context name is a short plain label'),
   /** Directory prefixes (repo-relative) whose files belong to this context. */
   paths: z.array(z.string().min(1)).min(1),
   /** Module or import-path prefixes this context owns, e.g. `AllocatorOne.DataRoom`. */

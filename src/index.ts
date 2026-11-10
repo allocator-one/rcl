@@ -49,7 +49,7 @@ import { historicalExecutionPlan, legacyPendingClaimRoles } from './converge/leg
 import { decodeOriginalReport } from './evidence/original-run/decode.js';
 import { originalRunReportSchema } from './telemetry/recovery/source.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
-import { specializeCouplingLensRole } from './roles/coupling-lens.js';
+import { COUPLING_LENS_ROLE_NAME, couplingCandidateNotes, specializeCouplingLensRole } from './roles/coupling-lens.js';
 import { defaultAdapterFactory, runReviews } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
 import {
@@ -2597,6 +2597,9 @@ async function prepareCouncilWork(
     contextDocs,
     plan: focus === undefined ? undefined : { focus },
     ...(taskContext ? { taskContext } : {}),
+    // Its candidates carry pull request filenames, so they go to the user prompt (RCL-49).
+    ...(couplingLens && assignment.role.name === COUPLING_LENS_ROLE_NAME
+      ? { untrustedNotes: couplingCandidateNotes(chunk.files, couplingLens) } : {}),
   })));
   return { chunks, chunkAssignments, contextDocs, prompts, bounds, taskContext };
 }

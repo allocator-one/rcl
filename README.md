@@ -563,8 +563,10 @@ customRoles:
 # Cross-context coupling lens (opt-in): declare the bounded contexts and the
 # `cross-context-coupling` role flags added lines in one context that reference
 # another context's modules, asking whether the shared part should move to a
-# neutral context first. Advisory: findings are requested at `minor`, which
-# never gates under either gating mode. Matching is a diff-only scan of added
+# neutral context first. Advisory: the reviewer is instructed to report at
+# `minor`, which never gates under either gating mode; that is a request, not a
+# cap, so a model that ignores it can still raise a gating finding. Context
+# names are short plain labels. Matching is a diff-only scan of added
 # lines (comments and module declarations skipped) on directory and identifier
 # boundaries; it cannot see drift that lives in tickets or docs, or across PRs
 # that share no line, and a brace alias like `alias App.{DataRoom, Logs}` is not
