@@ -840,17 +840,23 @@ The workflow contract, as in this repository's
 - the latest release installed by the verified installer, which checks the
   package against the registry's SHA-512 integrity before installing.
 
-For a PR above the default capacity, a repository collaborator with current
-write, maintain, or admin permission can apply one label named
-`rcl-cap/<current-head-sha>` with a description such as
-`chunks=256;calls=4096`. The CLI verifies the label's latest application
-event and actor permission, binds the grant to the exact reviewed head, and
-rechecks it before dispatch. Invalid, stale, or conflicting capacity labels
-refuse the review. Explicit capacity reads the complete pinned Git diff; it
-needs a GitHub token in `githubToken` or `GITHUB_TOKEN` when the exact objects
-are unavailable locally. The hard limits are 512 chunks and 8,192 blocking
-calls. PRs without a capacity label keep the default limits, including in the
-hosted attested gate.
+For a PR above the default capacity, repository collaborators with current
+write, maintain, or admin permission apply three labels to it:
+`rcl-cap/<current-head-sha>`, `rcl-cap-chunks/<n>` and `rcl-cap-calls/<n>`, for
+example `rcl-cap-chunks/256` and `rcl-cap-calls/4096`. The limits are the label
+names; a label description is never read, because it is repository-level and
+can be edited after the label was applied. The CLI verifies that the latest
+application event of each of the three labels came from an actor with current
+write permission, so the issue timeline records who approved each paid-spend
+limit. It binds the grant to the exact reviewed head and rechecks every
+application before dispatch. The two limit labels may stay on the PR across
+pushes, but nothing is authorized until the head label for the current head is
+applied again. A missing, removed, duplicated, stale or conflicting label, or one
+applied by an actor without write permission, refuses the review. Explicit
+capacity reads the complete pinned Git diff; it needs a GitHub token in
+`githubToken` or `GITHUB_TOKEN` when the exact objects are unavailable locally.
+The hard limits are 512 chunks and 8,192 blocking calls. PRs without a capacity
+label keep the default limits, including in the hosted attested gate.
 
 Abridged:
 

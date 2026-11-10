@@ -9,8 +9,12 @@
   accounting, and complete-seat checks. For large pull requests, verify the
   repository and exact commits and read the full pinned Git diff before any
   paid dispatch; incomplete GitHub file patches fail closed. The hosted gate
-  accepts a current-head capacity label applied by a repository maintainer
-  without changing the default workflow (RCL-162).
+  accepts a capacity grant of three labels, `rcl-cap/<head-sha>`,
+  `rcl-cap-chunks/<n>` and `rcl-cap-calls/<n>`, each last applied by a
+  repository writer, without changing the default workflow (RCL-162). The limits
+  are the label names, never a description, which anyone with label-edit rights
+  could change after the approval; the issue timeline records who applied each
+  limit.
 
 ## 4.5.38 - 2026-11-10
 

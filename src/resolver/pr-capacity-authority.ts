@@ -12,7 +12,13 @@ export interface PRCapacityAuthorization {
 
 type PullRequest = RestEndpointMethodTypes['pulls']['get']['response']['data'];
 type IssueEvent = RestEndpointMethodTypes['issues']['listEvents']['response']['data'][number];
-type CapacityLabel = { name: string; description: string; allocation: PRCapacityAuthorization };
+/**
+ * A grant is three labels, each applied by a repository writer: the exact-head
+ * marker and one label per limit. The limits live in the label names, never in
+ * a description: a description is repository-level and editable after the
+ * application, but each application event records who applied that exact name.
+ */
+type CapacityLabels = { names: string[]; allocation: PRCapacityAuthorization };
 const HISTORY_PAGE_SIZE = 100;
 const MAX_HISTORY_PAGES = 10;
 
@@ -28,38 +34,51 @@ class CapacityRefused extends Error {
   }
 }
 
-function capacityLabel(pr: PullRequest): CapacityLabel | undefined {
-  const labels = pr.labels.filter(label => /^rcl-cap(?:\/|$)/i.test(label.name));
-  if (labels.length === 0) return undefined;
-  if (labels.length !== 1) throw new CapacityRefused('ambiguous capacity labels.');
-  const label = labels[0]!;
-  if (!/^[a-f0-9]{40}$/.test(pr.head.sha) || label.name !== `rcl-cap/${pr.head.sha}`) {
+function capacityLabels(pr: PullRequest): CapacityLabels | undefined {
+  const present = pr.labels.map(label => label.name).filter(name => /^rcl-cap(?:[/-]|$)/i.test(name));
+  if (present.length === 0) return undefined;
+  const heads = present.filter(name => /^rcl-cap(?:\/|$)/i.test(name));
+  const chunks = present.filter(name => /^rcl-cap-chunks\//i.test(name));
+  const calls = present.filter(name => /^rcl-cap-calls\//i.test(name));
+  if (heads.length > 1 || chunks.length > 1 || calls.length > 1 ||
+      heads.length + chunks.length + calls.length !== present.length) {
+    throw new CapacityRefused('ambiguous capacity labels.');
+  }
+  if (!/^[a-f0-9]{40}$/.test(pr.head.sha) || heads[0] !== `rcl-cap/${pr.head.sha}`) {
     throw new CapacityRefused('the capacity label must name the exact current PR head.');
   }
-  const description = label.description;
-  if (typeof description !== 'string') {
-    throw new CapacityRefused('expected label description chunks=<n>;calls=<n>.');
+  if (chunks.length === 0 || calls.length === 0) {
+    throw new CapacityRefused('expected one rcl-cap-chunks/<n> and one rcl-cap-calls/<n> label.');
   }
   // No whitespace, coercion, implicit defaults, or trailing fields in a grant.
-  const match = /^chunks=([1-9][0-9]*);calls=([1-9][0-9]*)$/.exec(description);
-  if (!match || match[0] !== description) {
-    throw new CapacityRefused('expected label description chunks=<n>;calls=<n>.');
+  const chunkMatch = /^rcl-cap-chunks\/([1-9][0-9]*)$/.exec(chunks[0]!);
+  const callMatch = /^rcl-cap-calls\/([1-9][0-9]*)$/.exec(calls[0]!);
+  if (!chunkMatch || !callMatch) {
+    throw new CapacityRefused('expected labels rcl-cap-chunks/<n> and rcl-cap-calls/<n>.');
   }
-  const maxReviewChunks = Number(match[1]);
-  const maxBlockingCalls = Number(match[2]);
+  const maxReviewChunks = Number(chunkMatch[1]);
+  const maxBlockingCalls = Number(callMatch[1]);
   if (!Number.isSafeInteger(maxReviewChunks) || maxReviewChunks > MAX_REVIEW_CAPACITY.maxChunks ||
       !Number.isSafeInteger(maxBlockingCalls) || maxBlockingCalls > MAX_BLOCKING_CALLS_HARD_LIMIT) {
     throw new CapacityRefused('capacity limits exceed the supported hard bounds.');
   }
-  return { name: label.name, description, allocation: { maxReviewChunks, maxBlockingCalls, headSha: pr.head.sha } };
+  return {
+    names: [heads[0]!, chunks[0]!, calls[0]!],
+    allocation: { maxReviewChunks, maxBlockingCalls, headSha: pr.head.sha },
+  };
 }
 
-async function latestApplication(client: Octokit, target: GitHubTarget, name: string): Promise<IssueEvent> {
+async function latestApplications(
+  client: Octokit, target: GitHubTarget, names: string[]
+): Promise<Map<string, IssueEvent>> {
+  const wanted = new Map(names.map(name => [name.toLowerCase(), name]));
   const ids = new Set<number>();
-  let pages = 0, latest: IssueEvent | undefined;
+  const latest = new Map<string, IssueEvent>();
+  let pages = 0;
   // REST issue events have no documented ordering guarantee. Read complete
-  // bounded history, retaining only matching IDs and the latest transition.
-  // One overflow page detects incompleteness without collecting the history.
+  // bounded history, retaining only matching IDs and the latest transition of
+  // each capacity label. One overflow page detects incompleteness without
+  // collecting the history.
   for await (const { data: events } of client.paginate.iterator(client.issues.listEvents, {
     owner: target.owner, repo: target.repo, issue_number: target.number, per_page: HISTORY_PAGE_SIZE,
   })) {
@@ -67,24 +86,31 @@ async function latestApplication(client: Octokit, target: GitHubTarget, name: st
       throw new CapacityRefused('capacity label history exceeds the 1000-event limit.');
     }
     for (const event of events) {
-      if ((event.event !== 'labeled' && event.event !== 'unlabeled') ||
-          eventLabelName(event)?.toLowerCase() !== name.toLowerCase()) continue;
+      if (event.event !== 'labeled' && event.event !== 'unlabeled') continue;
+      const key = eventLabelName(event)?.toLowerCase();
+      if (key === undefined || !wanted.has(key)) continue;
       const createdAt = Date.parse(event.created_at);
       if (!Number.isSafeInteger(event.id) || event.id < 1 || ids.has(event.id) ||
           !Number.isFinite(createdAt)) {
         throw new CapacityRefused('ambiguous capacity label history.');
       }
       ids.add(event.id);
+      const current = latest.get(key);
       // IDs disambiguate transitions within GitHub's timestamp precision.
-      if (!latest || createdAt > Date.parse(latest.created_at) ||
-          createdAt === Date.parse(latest.created_at) && event.id > latest.id) latest = event;
+      if (!current || createdAt > Date.parse(current.created_at) ||
+          createdAt === Date.parse(current.created_at) && event.id > current.id) latest.set(key, event);
     }
   }
-  if (!latest || latest.event !== 'labeled' || eventLabelName(latest) !== name ||
-      !latest.actor?.login || !Number.isSafeInteger(latest.actor.id) || latest.actor.id < 1) {
-    throw new CapacityRefused('capacity label is removed or has no attributable application.');
+  const applications = new Map<string, IssueEvent>();
+  for (const name of names) {
+    const event = latest.get(name.toLowerCase());
+    if (!event || event.event !== 'labeled' || eventLabelName(event) !== name ||
+        !event.actor?.login || !Number.isSafeInteger(event.actor.id) || event.actor.id < 1) {
+      throw new CapacityRefused('a capacity label is removed or has no attributable application.');
+    }
+    applications.set(name, event);
   }
-  return latest;
+  return applications;
 }
 
 /**
@@ -101,38 +127,49 @@ export async function resolvePRCapacity(
 ): Promise<PRCapacityAuthorization | undefined> {
   try {
     const client = octokit ?? await createGitHubClient(token);
-    const initial = capacityLabel((await getGitHubPullRequest(client, target)).data);
+    const initial = capacityLabels((await getGitHubPullRequest(client, target)).data);
     if (!initial) return undefined;
 
     const authentication = await client.auth() as { type?: string; token?: string };
     if (authentication?.type !== 'token' || !authentication.token?.trim()) {
       throw new CapacityRefused('authenticated GitHub metadata is required.');
     }
-    const application = await latestApplication(client, target, initial.name);
-    const actor = application.actor!;
-    const { data: permission } = await client.repos.getCollaboratorPermissionLevel({
-      owner: target.owner, repo: target.repo, username: actor.login,
-    });
-    // permission is GitHub's effective base permission; role_name may be an
-    // arbitrary custom role. Never authorize from its name or author association.
-    if (!['write', 'maintain', 'admin'].includes(permission.permission) ||
-        permission.user?.id !== actor.id ||
-        permission.user.login.toLowerCase() !== actor.login.toLowerCase()) {
-      throw new CapacityRefused('the applying actor lacks verified current repository write permission.');
+    const applications = await latestApplications(client, target, initial.names);
+    // Every label is a separate paid-spend decision: each one's latest
+    // application must come from an actor with current write permission.
+    const checked = new Set<number>();
+    for (const application of applications.values()) {
+      const actor = application.actor!;
+      if (checked.has(actor.id)) continue;
+      const { data: permission } = await client.repos.getCollaboratorPermissionLevel({
+        owner: target.owner, repo: target.repo, username: actor.login,
+      });
+      // permission is GitHub's effective base permission; role_name may be an
+      // arbitrary custom role. Never authorize from its name or author association.
+      if (!['write', 'maintain', 'admin'].includes(permission.permission) ||
+          permission.user?.id !== actor.id ||
+          permission.user.login.toLowerCase() !== actor.login.toLowerCase()) {
+        throw new CapacityRefused('the applying actor lacks verified current repository write permission.');
+      }
+      checked.add(actor.id);
     }
 
-    const rechecked = capacityLabel((await getGitHubPullRequest(client, target)).data);
-    if (rechecked?.name !== initial.name || rechecked.description !== initial.description) {
+    const rechecked = capacityLabels((await getGitHubPullRequest(client, target)).data);
+    if (rechecked === undefined || rechecked.names.join('\n') !== initial.names.join('\n') ||
+        rechecked.allocation.headSha !== initial.allocation.headSha) {
       throw new CapacityRefused('capacity label or PR head changed during authorization.');
     }
-    // Bind the final PR snapshot to the original approval: a remove/reapply
-    // during that read must not reuse the previous actor's permission check.
-    const recheckedApplication = await latestApplication(client, target, initial.name);
-    if (recheckedApplication.id !== application.id ||
-        recheckedApplication.actor?.id !== actor.id ||
-        recheckedApplication.actor.login !== actor.login ||
-        recheckedApplication.created_at !== application.created_at) {
-      throw new CapacityRefused('capacity label application changed during authorization.');
+    // Bind the final PR snapshot to the original approvals: a remove/reapply
+    // during that read must not reuse a previous actor's permission check.
+    const recheckedApplications = await latestApplications(client, target, initial.names);
+    for (const [name, application] of applications) {
+      const again = recheckedApplications.get(name);
+      if (again?.id !== application.id ||
+          again.actor?.id !== application.actor?.id ||
+          again.actor?.login !== application.actor?.login ||
+          again.created_at !== application.created_at) {
+        throw new CapacityRefused('capacity label application changed during authorization.');
+      }
     }
     return initial.allocation;
   } catch (error) {
