@@ -8,7 +8,9 @@
   transport from RCL-213 took it for a customised dispatcher and left it alone,
   so proxy users on Node 26 could keep HTTP/2 through the tunnel. The transport
   now replaces an option-less `EnvHttpProxyAgent` with one that has
-  `allowH2: false`; a dispatcher a `--import` preload customised still survives.
+  `allowH2: false`; a dispatcher a `--import` preload customised still survives,
+  including one with its own `httpProxy` or `httpsProxy` (an explicit `noProxy`
+  stays private inside undici's agent and is not detected).
 
 ## 4.5.39 - 2026-11-10
 

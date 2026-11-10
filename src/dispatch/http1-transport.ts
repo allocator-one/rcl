@@ -37,9 +37,42 @@ function isUntouchedDefault(dispatcher: Dispatcher): boolean {
   const name = dispatcher.constructor.name;
   if (name === 'Agent') return hasDefaultOptions(dispatcher);
   // An EnvHttpProxyAgent keeps its options private, but builds a plain `Agent` from everything
-  // except the proxy settings, which is where a customised timeout or connect option lands.
-  if (name === 'EnvHttpProxyAgent' && envProxyEnabled()) return hasDefaultOptions(namedMember(dispatcher, 'no proxy agent'));
+  // except the proxy settings, which is where a customised timeout or connect option lands. The
+  // proxy settings land in the proxy agents it builds, so those are compared with the environment's.
+  if (name === 'EnvHttpProxyAgent' && envProxyEnabled()) {
+    return hasDefaultOptions(namedMember(dispatcher, 'no proxy agent')) && routesByEnvironment(dispatcher);
+  }
   return false;
+}
+
+/**
+ * Whether an `EnvHttpProxyAgent` sends the http and https traffic where the environment says, as a
+ * default one does. A preload's explicit `httpProxy` or `httpsProxy` differs from it and must survive.
+ * An explicit `noProxy` stays private inside the agent and cannot be seen. A route that cannot be
+ * read counts as customised, like an option that cannot be read.
+ */
+function routesByEnvironment(dispatcher: object): boolean {
+  let reference: EnvHttpProxyAgent;
+  try {
+    reference = new EnvHttpProxyAgent();
+  } catch {
+    return false;
+  }
+  reference.close().catch(() => undefined);
+  const current = proxyRoutes(dispatcher);
+  return !current.includes(undefined) && isDeepStrictEqual(current, proxyRoutes(reference));
+}
+
+/** The proxy URI each protocol goes through, `'direct'` when it uses the agent without a proxy. */
+function proxyRoutes(dispatcher: object): unknown[] {
+  const direct = namedMember(dispatcher, 'no proxy agent');
+  return ['http proxy agent', 'https proxy agent'].map((name) => {
+    const agent = namedMember(dispatcher, name);
+    if (typeof agent !== 'object' || agent === null) return undefined;
+    if (agent === direct) return 'direct';
+    const proxy = namedMember(agent, 'proxy agent options');
+    return typeof proxy === 'object' && proxy !== null ? (proxy as { uri?: unknown }).uri : undefined;
+  });
 }
 
 function hasDefaultOptions(agent: unknown): boolean {

@@ -244,6 +244,18 @@ describe('environment proxy (RCL-213)', () => {
       expect(getGlobalDispatcher()).toBe(preload);
     });
 
+    // A preload may route through a proxy of its own; replacing it would send the calls elsewhere.
+    it.each([
+      ['httpsProxy', { httpsProxy: 'http://127.0.0.1:9' }],
+      ['httpProxy', { httpProxy: 'http://127.0.0.1:9' }],
+    ])('leaves a preload\'s EnvHttpProxyAgent with its own %s in place', (_name, options) => {
+      useEnvProxy();
+      const preload = new EnvHttpProxyAgent(options);
+      setGlobalDispatcher(preload);
+      expect(installHttp1Transport({ connect })).toBe(preload);
+      expect(getGlobalDispatcher()).toBe(preload);
+    });
+
     it('is left in place when installing twice', () => {
       useEnvProxy();
       setGlobalDispatcher(new EnvHttpProxyAgent());
