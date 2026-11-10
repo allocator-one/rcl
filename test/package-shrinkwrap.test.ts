@@ -87,6 +87,24 @@ describe('buildShrinkwrap', () => {
     expect(() => buildShrinkwrap(unpinned, pkg)).toThrow(/node_modules\/a/);
   });
 
+  it('refuses a production package without a version, which no hash can pin on its own', () => {
+    const unversioned = structuredClone(lock);
+    delete (unversioned.packages['node_modules/a'] as Record<string, unknown>).version;
+    expect(() => buildShrinkwrap(unversioned, pkg)).toThrow(/node_modules\/a/);
+  });
+
+  it('refuses a linked production package, which carries no URL or hash to pin', () => {
+    const linked = structuredClone(lock);
+    linked.packages['node_modules/a'] = { resolved: 'packages/a', link: true } as never;
+    expect(() => buildShrinkwrap(linked, pkg)).toThrow(/node_modules\/a/);
+  });
+
+  it('keeps a linked package that only a dev dependency reaches out of the check', () => {
+    const devLink = structuredClone(lock);
+    devLink.packages['node_modules/b'] = { resolved: 'packages/b', link: true } as never;
+    expect(Object.keys(buildShrinkwrap(devLink, pkg).packages)).toEqual(['', 'node_modules/a']);
+  });
+
   it('refuses a lockfile that no longer matches the package version', () => {
     expect(() => buildShrinkwrap(lock, { ...pkg, version: '1.0.1' })).toThrow(/out of date/);
   });

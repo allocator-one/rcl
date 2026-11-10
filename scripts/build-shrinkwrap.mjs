@@ -73,8 +73,9 @@ export function buildShrinkwrap(lock, pkg) {
       pruned[path] = root;
       continue;
     }
-    if (!entry.link && (!entry.resolved || !entry.integrity)) {
-      throw new Error(`${path} has no resolved URL and integrity in package-lock.json`);
+    // A link points at a local directory: no registry URL or hash can pin it, so it is never accepted.
+    if (entry.link || !entry.version || !entry.resolved || !entry.integrity) {
+      throw new Error(`${path} has no version, resolved URL and integrity in package-lock.json`);
     }
     pruned[path] = entry;
   }
