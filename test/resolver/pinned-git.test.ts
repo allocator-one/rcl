@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { loadPinnedGitDiff } from '../../src/resolver/git.js';
+import { loadPinnedGitDiff, PinnedGitObjectsUnavailableError } from '../../src/resolver/git.js';
 
 const exec = promisify(execFile);
 const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
@@ -143,6 +143,24 @@ describe('pinned PR Git patches', () => {
       .rejects.toThrow('merge base disagrees');
     const diff = await loadPinnedGitDiff({ ...input(), expectedMergeBaseSha: baseSha });
     expect(diff.mergeBaseSha).toBe(baseSha);
+  });
+
+  it.skipIf(process.platform === 'win32')('does not offer hosted acquisition after a local Git output-limit failure', async () => {
+    // An operational failure is not a missing object: it must keep its own
+    // refusal instead of selecting the hosted fallback.
+    const shimDir = await mkdtemp(join(tmpdir(), 'rcl-pinned-shim-'));
+    const realGit = (await exec('sh', ['-c', 'command -v git'])).stdout.trim();
+    await writeFile(join(shimDir, 'git'), `#!/bin/sh\ncase " $* " in *" --is-shallow-repository "*) head -c 20000 /dev/zero | tr '\\0' x; exit 0;; esac\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o700 });
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}:${originalPath ?? ''}`;
+    try {
+      const failure = await loadPinnedGitDiff(input()).then(() => undefined, (error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(PinnedGitObjectsUnavailableError);
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH']; else process.env['PATH'] = originalPath;
+      await rm(shimDir, { recursive: true, force: true });
+    }
   });
 
   it('enforces the selected output bound and the hard ceiling', async () => {

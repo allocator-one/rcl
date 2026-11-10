@@ -192,7 +192,11 @@ export async function loadPinnedGitDiff(options: PinnedGitDiffOptions): Promise<
     }
     mergeBaseSha = (await readGit(['merge-base', '--all', options.baseSha, options.headSha])).trim();
     if (!FULL_OBJECT_ID.test(mergeBaseSha)) throw new Error('ambiguous or missing merge base');
-  } catch {
+  } catch (error) {
+    // A timeout, output limit or missing git binary is an operational failure,
+    // not proof that objects are absent, and must not select hosted acquisition.
+    const failure = error as { killed?: unknown; signal?: unknown; code?: unknown };
+    if (failure.killed === true || typeof failure.signal === 'string' || typeof failure.code === 'string') throw error;
     throw new PinnedGitObjectsUnavailableError('Pinned PR diff requires both exact commits and one unambiguous merge base in a complete local repository.');
   }
   if (options.expectedMergeBaseSha !== undefined && options.expectedMergeBaseSha !== mergeBaseSha) {
