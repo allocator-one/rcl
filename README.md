@@ -405,12 +405,14 @@ rcl roles show <name>      # system prompt and details for a role
 | `regression-hunter` | Changed defaults, weakened guards, and lost behavior |
 | `dependency-hygiene` | Unnecessary dependencies, external requests, and privacy leaks |
 | `edge-case-hunter` | Boundary values, unusual inputs, and failure paths |
+| `cross-context-coupling` | Advisory: a diff wires one bounded context's module into another (needs `couplingLens`) |
 
 By default every role runs except `spec-compliance`, which runs only when a
 spec is supplied. `general` runs on each primary model; specialist roles are
 spread round-robin across primary and secondary models. The default council
 therefore schedules 13 reviewer seats, or 14 when a spec enables
-`spec-compliance`. Seats on the primary models (Opus 5.5 and Sol) form the
+`spec-compliance` (one more when `couplingLens` enables
+`cross-context-coupling`). Seats on the primary models (Opus 5.5 and Sol) form the
 blocking lane that reviewer health and quorum count; Gemini receives specialist
 seats only, in the secondary lane, whose results keep their findings but do not
 count toward quorum. The async reviewer and the verifier are separate lanes.
@@ -557,6 +559,31 @@ customRoles:
     systemPrompt: |
       Enforce our team style guide. Flag any deviation from snake_case
       variable names and require docstrings on all public functions.
+
+# Cross-context coupling lens (opt-in): declare the bounded contexts and the
+# `cross-context-coupling` role flags added lines in one context that reference
+# another context's modules, asking whether the shared part should move to a
+# neutral context first. Advisory: findings are requested at `minor`, which
+# never gates under either gating mode. Matching is a diff-only scan of added
+# lines (comments and module declarations skipped) on directory and identifier
+# boundaries; it cannot see drift that lives in tickets or docs, or across PRs
+# that share no line, and a brace alias like `alias App.{DataRoom, Logs}` is not
+# matched. Without this section the role does not run.
+couplingLens:
+  contexts:
+    - name: DataRoom
+      paths: [lib/allocator_one/data_room]   # directory prefixes; longest wins
+      modules: [AllocatorOne.DataRoom]       # module or import-path prefixes; longest wins
+    - name: Contacts
+      paths: [lib/allocator_one/contacts]
+      modules: [AllocatorOne.Contacts]
+    - name: ProductLogs
+      paths: [lib/allocator_one/product_logs]
+      modules: [AllocatorOne.ProductLogs]
+  neutral: [ProductLogs]                     # any context may reference these
+  allow:                                     # intended, directed references
+    - { from: Contacts, to: DataRoom }
+  severity: minor                            # important | minor (default) | nitpick
 
 # Consensus and deduplication thresholds
 thresholds:

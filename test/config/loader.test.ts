@@ -54,6 +54,16 @@ describe('loadConfig', () => {
     expect((await loadConfig(undefined, dir)).openaiReasoningEffort).toBe('high');
   });
 
+  it('loads a couplingLens section and rejects one that names an undefined context', async () => {
+    const contexts =
+      'contexts:\n      - { name: A, paths: [lib/a], modules: [App.A] }\n      - { name: B, paths: [lib/b], modules: [App.B] }\n';
+    await writeFile(join(dir, '.review-council.yml'), `couplingLens:\n    ${contexts}    neutral: [B]\n`);
+    expect((await loadConfig(undefined, dir)).couplingLens?.neutral).toEqual(['B']);
+
+    await writeFile(join(dir, '.review-council.yml'), `couplingLens:\n    ${contexts}    neutral: [Nope]\n`);
+    await expect(loadConfig(undefined, dir)).rejects.toThrow(/couplingLens\.neutral/);
+  });
+
   it('preserves an explicit concurrency of six for rollback', async () => {
     await writeFile(join(dir, '.review-council.yml'), 'concurrency: 6\n');
     const config = await loadConfig(undefined, dir);

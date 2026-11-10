@@ -134,6 +134,7 @@ function mergeWithDefaults(config: Config, preserveDefaultRoster = false): Confi
     roles: config.roles,
     reviewers: config.reviewers,
     customRoles: config.customRoles,
+    couplingLens: config.couplingLens,
     thresholds: {
       ...DEFAULT_THRESHOLDS,
       ...config.thresholds,

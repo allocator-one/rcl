@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add the opt-in `cross-context-coupling` lens (RCL-49). With a `couplingLens`
+  section declaring a repository's bounded contexts, a deterministic scan finds
+  added lines in one context that reference another context's modules and hands
+  only those candidates to an advisory reviewer, which asks whether the shared
+  part should move to a neutral context before the new consumer lands. Neutral
+  contexts and intended references are configurable, findings are requested at
+  `minor` by default and so never gate, and the role does not run without the
+  section. It catches code coupling in a diff only, not drift in tickets or
+  docs or across PRs that share no line.
+
 ## 4.5.44 - 2026-11-10
 
 - Admit explicitly bounded full-patch reviews above the ordinary 32-chunk limit

@@ -1,6 +1,7 @@
 import { access } from 'fs/promises';
 import { join } from 'path';
 import { BUILTIN_ROLES, getRoleByName } from './builtin.js';
+import { COUPLING_LENS_ROLE_NAME } from './coupling-lens.js';
 import type { Role } from './types.js';
 import type { Config } from '../config/schema.js';
 
@@ -93,6 +94,9 @@ export async function resolveRoles(
   // when requested by name.
   const missingContent = new Set<string>();
   if (!specContent) missingContent.add('spec-compliance');
+  // The coupling lens has nothing to judge without the repository's declared
+  // contexts (RCL-49), so it is opt-in through `couplingLens`.
+  if (!config.couplingLens) missingContent.add(COUPLING_LENS_ROLE_NAME);
 
   // Determine which roles to use
   const requested = requestedRoles ?? (config.roles as string[] | undefined);
@@ -116,7 +120,9 @@ export async function resolveRoles(
       }
       if (missingContent.has(role.name)) {
         console.warn(
-          `Warning: role "${role.name}" was requested but no spec file was found — it will run without that content`
+          role.name === COUPLING_LENS_ROLE_NAME
+            ? `Warning: role "${role.name}" was requested but no couplingLens config was found — it will run without declared contexts`
+            : `Warning: role "${role.name}" was requested but no spec file was found — it will run without that content`
         );
       }
       result.push(role);

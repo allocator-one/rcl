@@ -1,4 +1,5 @@
 import type { Role } from './types.js';
+import { COUPLING_LENS_ROLE } from './coupling-lens.js';
 
 export const BUILTIN_ROLES: Role[] = [
   {
@@ -274,6 +275,7 @@ Be specific about the exact input that triggers the bug and what incorrect behav
 
 Severity: bugs that cause data corruption or duplication are "critical". Bugs that cause incorrect UI state or wasted backend work are "important". Cosmetic or unlikely edge cases are "minor".`,
   },
+  COUPLING_LENS_ROLE,
 ];
 
 export function getRoleByName(name: string): Role | undefined {
