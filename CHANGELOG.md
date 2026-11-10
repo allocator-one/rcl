@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.41 - 2026-11-10
+
 - Publish `@allocator-one/rcl` with an `npm-shrinkwrap.json` (RCL-208). The
   tarball declared its ten runtime dependencies with caret ranges and no
   lockfile, so each install resolved whatever was newest within them. `npm
