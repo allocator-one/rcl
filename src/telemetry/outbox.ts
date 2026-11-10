@@ -12,8 +12,9 @@ import type { HarnessSink, RequestOptions } from './sink.js';
 /**
  * Failed deliveries wait here (epic IO-12475, section 8.4): one directory
  * per run under `<data dir>/outbox/`, holding the envelope, the artifacts
- * and any events that could not be sent. Flushed at the start of every rcl
- * command (bounded) and by `rcl telemetry flush` (to completion). Retried
+ * and any events that could not be sent. Legacy reviews flush at startup
+ * (bounded); guarded reviews and recovery operations leave unrelated evidence
+ * queued for `rcl telemetry flush` (to completion). Retried
  * deliveries carry `delivery: {mode: retried, spooled_at}` and keep their
  * original ids, so the server dedupes them.
  *

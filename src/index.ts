@@ -7,7 +7,7 @@ import { createReviewCycleRemote } from './converge/cycle-remote.js';
 import { prSnapshotFrom, readPrSnapshot, writePrSnapshot } from './converge/pr-snapshot.js';
 import { applyFreshReviewClose, previewFreshReviewClose } from './converge/fresh-review-close.js';
 import { inspectRoundLiveness, roundLivenessExitCode, waitForRoundOutcome } from './converge/round-liveness.js';
-import { assertNoPendingFreshReview, freshReviewOutputPaths } from './converge/fresh-review.js';
+import { assertNoPendingFreshReview, freshReviewOutputPaths, freshReviewRequestVersion } from './converge/fresh-review.js';
 import { previewStaleReport, applyStaleReport } from './converge/stale-report.js';
 import { previewHistoricalDeliveryReconciliation,
   applyHistoricalDeliveryReconciliation } from './converge/historical-delivery-reconciliation.js';
@@ -109,6 +109,7 @@ import {
 } from './converge/run-state.js';
 import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
 import { withNativeTarget } from './converge/target-ownership.js';
+import { withLaunchPreflight } from './converge/launch-phase.js';
 import { guardReviewLaunch, ReviewCouncilInterrupted, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions,
   type OrdinaryCheckpoint } from './converge/launch-guard.js';
 import { selectCurrentRecoveredProduction, type RecoveredProduction } from './converge/recovered-production.js';
@@ -736,11 +737,11 @@ program
 
 program
   .command('converge-status')
-  .description('Report whether the target\'s latest converge round is running, dead, not launched or finished, ' +
+  .description('Report whether the target\'s latest converge round is launching, running, dead, not launched or finished, ' +
     'without changing any state. Exit 6 means the round is abandoned: its launching process is gone and nothing will finish it (RCL-232)')
   .requiredOption('--target <target>')
-  .option('--head <sha>', 'The head a round is expected for; a latest launch at another head reads as not launched')
-  .option('--wait <minutes>', 'Keep polling while the round is running, up to this many minutes; return as soon as it finishes or dies')
+  .option('--head <sha>', 'The head a round is expected for; a live round reports its actual head')
+  .option('--wait <minutes>', 'Keep polling while the round is launching or running, up to this many minutes; return as soon as it finishes or dies')
   .option('--interval <seconds>', 'Polling interval for --wait', '30')
   .option('--json')
   .action(async (opts: { target: string; head?: string; wait?: string; interval: string; json?: boolean }) => {
@@ -1318,7 +1319,12 @@ telemetry
       level: runtime.level,
       repoManaged: runtime.repoManaged,
       credential: runtime.credential
-        ? { source: runtime.credential.source, host: credentialHost(runtime.credential) }
+        ? {
+            source: runtime.credential.source,
+            host: credentialHost(runtime.credential),
+            file: runtime.credentialOrigin?.file ?? null,
+            reason: runtime.credentialOrigin?.reason ?? null,
+          }
         : null,
       note: runtime.note ?? null,
       outbox: { dir: runtime.outbox.dir, entries, pendingLoss: loss, refusedLoss: refused },
@@ -1338,6 +1344,8 @@ telemetry
         ? `Credential: ${status.credential.source} → ${status.credential.host}`
         : `Credential: none${status.note ? ` (${status.note})` : ''}`
     );
+    if (status.credential?.file) console.log(`  File: ${status.credential.file}`);
+    if (status.credential?.reason) console.log(`  Why: ${status.credential.reason}`);
     console.log(`Outbox: ${runtime.outbox.dir} — ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`);
     for (const entry of entries) {
       console.log(
@@ -1772,6 +1780,8 @@ type Spinner = ReturnType<typeof ora>;
 
 /** CLI options shared by every council-running command. */
 interface CouncilCliOpts {
+  /** Internal ownership held from accepted CLI preflight through the terminal launch record. */
+  launchOwnership?: NativeTargetOwnership;
   role?: string;
   roles?: string;
   reviewer?: string[];
@@ -2147,7 +2157,14 @@ async function discoverCycleReview(target: string | undefined, opts: CouncilCliO
   catch (error) { if (opts.startOver) throw error; return opts; }
   if (!opts.startOver) await assertNoPendingFreshReview(common, targetKey);
   const active = opts.startOver ? undefined : await loadConvergeRunState(common, targetKey);
-  if (!opts.startOver && !active?.cycle) return opts;
+  if (!opts.startOver && !active?.cycle) {
+    const context = resolveConvergeContext(opts, reviewConvergeEnvironment(opts));
+    // A PR-bound convergence patch must register its launch even outside a
+    // fresh cycle. Keep explicitly preclaimed legacy invocations unchanged.
+    const boundPatch = target && !isGitHubTarget(target) && !opts.staged && !opts.workingTree;
+    return boundPatch && context && context.attempt === undefined && !opts.attest
+      ? { ...opts, guardedConverge: true } : opts;
+  }
   const recoveredPreclaim = active?.version === 3 && opts.guardedConverge && opts.attempt !== undefined;
   if ((opts.attempt !== undefined && !recoveredPreclaim) || (opts.startOver && opts.round !== undefined) || opts.attest) {
     throw new Error('A fresh review assigns its own ordinals and needs an ordinary actor credential');
@@ -2230,15 +2247,30 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       throw new ReviewLaunchRefused('pending_preview_incompatible', '--preview-pending requires one pending recovery mode and --ordinary-pending-package, without --retry-report.');
     }
     if (!opts.exportPendingPackage) opts = { ...opts, ...await discoverCycleReview(target, opts) };
-    // Finalize-only is a recovery-state operation even though it is exposed by
-    // `review`; preview and apply must not flush unrelated review evidence.
-    if (!opts.exportPendingPackage && !opts.finalizePendingOnly && !opts.cycleReview && opts.telemetry !== false &&
+    // Guarded launches must acknowledge ownership before network work. Leave
+    // unrelated evidence queued for an explicit flush, which may acquire its
+    // own target locks. Recovery preview/apply also leave that queue untouched.
+    if (!opts.guardedConverge && !opts.launchOwnership && !opts.exportPendingPackage && !opts.finalizePendingOnly && !opts.cycleReview && opts.telemetry !== false &&
       (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() !== 'off') {
       try {
         if ((await readdir(join(resolveDataDir(), 'outbox')).catch(() => [])).length > 0) {
           await flushOutboxAtStart(await createTelemetryRuntime({ rclVersion: RCL_VERSION }));
         }
       } catch { /* Startup delivery remains best-effort for legacy reviews. */ }
+    }
+    if (opts.guardedConverge && !opts.launchOwnership && !opts.exportPendingPackage &&
+      !opts.finalizePendingOnly && !opts.resumePending) {
+      const context = resolveConvergeContext(opts, reviewConvergeEnvironment(opts));
+      if (!context) throw new ReviewLaunchRefused('target_required', 'A guarded launch requires --converge-target.');
+      const common = await resolveGitCommonDir();
+      const requestVersion = opts.startOver ? await freshReviewRequestVersion(common, context.target) : undefined;
+      return await withNativeTarget(common, context.target, ownership => withLaunchPreflight(ownership, common, context.target, async () => {
+        if (opts.startOver && await freshReviewRequestVersion(common, context.target) !== requestVersion) {
+          throw new ReviewLaunchRefused('fresh_review_request_changed',
+            'Another launch handled the pending fresh request; inspect its outcome before requesting another cycle.');
+        }
+        await runReview(target, { ...opts, launchOwnership: ownership });
+      }), { lockTimeoutMs: 5_000 });
     }
     if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined || opts.retryReport !== undefined ||
       opts.maxAttempts !== undefined || opts.maxRounds !== undefined || opts.maxSliceMinutes !== undefined)) {
@@ -2839,6 +2871,7 @@ async function executeCouncil(
         '--max-slice-minutes needs a journaled council (an exact head and base within the capture limits); rerun without it.');
     }
     const claim = await guardReviewLaunch({
+      ...(opts.launchOwnership ? { ownership: opts.launchOwnership } : {}),
       gitCommonDir: await resolveGitCommonDir(),
       target: prepared.converge!.target,
       startOver: opts.startOver, cycleRemote,

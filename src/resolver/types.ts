@@ -14,6 +14,20 @@ export interface FileChange {
   blobSha?: string;
 }
 
+/**
+ * Files whose patch was left out of the reviewed diff because the base
+ * commit's `.gitattributes` marks them generated. The files themselves stay in
+ * the diff, bound by blob id (see leaveOutGenerated).
+ */
+export interface LeftOutPaths {
+  reason: 'linguist-generated';
+  /** Commit whose root `.gitattributes` made the call (the PR's base tip). */
+  ref: string;
+  count: number;
+  /** Sorted; at most the first 100, `count` carries the total. */
+  paths: string[];
+}
+
 export interface PRMetadata {
   owner: string;
   repo: string;
@@ -35,6 +49,7 @@ export interface PRMetadata {
   url: string;
   labels: string[];
   draft: boolean;
+  leftOut?: LeftOutPaths;
 }
 
 export interface Diff {

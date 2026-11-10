@@ -61,6 +61,7 @@ export async function resolveReviewTarget(
       baseSha: m.mergeBaseSha ?? m.baseSha,
       headRef: m.head,
       baseRef: m.base,
+      ...(m.leftOut ? { leftOut: m.leftOut } : {}),
     };
   }
   if (gitMode) {
