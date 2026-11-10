@@ -9,12 +9,13 @@ interface DirectoryMetadata { uid: number; mode: number; isDirectory: () => bool
 /**
  * An ancestor may be group-writable only when the group is the owner's own
  * user-private group (`privateGroup`, see isUserPrivateGroup): Ubuntu's umask
- * 002 leaves checkouts at 775 with a group nobody else belongs to. World-write
- * and the private root stay refused either way.
+ * 002 leaves checkouts at 775 with a group nobody else belongs to. World-write,
+ * a root-owned group-writable directory (even for a root caller) and the
+ * private root stay refused either way.
  */
 export function checkLockDirectory(info: DirectoryMetadata, uid: number, privateRoot: boolean, privateGroup = false): void {
   const mode = info.mode & 0o7777;
-  const ownGroupWrite = privateGroup && info.uid === uid ? 0o020 : 0;
+  const ownGroupWrite = privateGroup && info.uid === uid && uid !== 0 ? 0o020 : 0;
   if (!info.isDirectory() || info.isSymbolicLink() ||
       (privateRoot ? info.uid !== uid || mode !== 0o700 :
         (info.uid !== 0 && info.uid !== uid) || ((mode & 0o022 & ~ownGroupWrite) !== 0 && !(info.uid === 0 && (mode & 0o1000) !== 0)))) {
@@ -26,13 +27,29 @@ type AccountReader = (path: string) => Promise<string>;
 const accountRows = async (read: AccountReader, path: string): Promise<string[][]> =>
   (await read(path)).split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(':'));
 
+// Only the local files (and nss-systemd's dynamic users) may answer passwd and group lookups.
+// Any other source (sss, ldap, nis, compat, winbind…) can add members these files do not list.
+const localAccountSources = new Set(['files', 'systemd']);
+async function usesOnlyLocalAccountFiles(read: AccountReader): Promise<boolean> {
+  const lines = (await read('/etc/nsswitch.conf')).split('\n').map(line => line.replace(/#.*/, '').trim());
+  return ['passwd', 'group'].every(database => {
+    const line = lines.find(candidate => candidate.startsWith(`${database}:`));
+    const sources = line?.slice(database.length + 1).replace(/\[[^\]]*\]/g, ' ').split(/\s+/).filter(Boolean) ?? [];
+    return sources.length > 0 && sources.every(source => localAccountSources.has(source));
+  });
+}
+
 /**
  * True when `gid` is the primary group of `uid` and nobody else is in it, as
- * with Debian/Ubuntu user-private groups. Reads only /etc/passwd and /etc/group
- * and answers false when either is unreadable or does not show the owner.
+ * with Debian/Ubuntu user-private groups. Reads only /etc/passwd, /etc/group and
+ * /etc/nsswitch.conf; answers false when any is unreadable, when the lookup
+ * order names a source other than local files, when the owner is not shown and
+ * for root or group 0.
  */
 export async function isUserPrivateGroup(uid: number, gid: number, read: AccountReader = path => readFile(path, 'utf8')): Promise<boolean> {
+  if (uid === 0 || gid === 0) return false;
   try {
+    if (!await usesOnlyLocalAccountFiles(read)) return false;
     const passwd = await accountRows(read, '/etc/passwd'); const groups = await accountRows(read, '/etc/group');
     const owner = passwd.find(row => row[2] === String(uid));
     const matching = groups.filter(row => row[2] === String(gid));
@@ -40,6 +57,18 @@ export async function isUserPrivateGroup(uid: number, gid: number, read: Account
       passwd.every(row => row[3] !== String(gid) || row[2] === String(uid)) &&
       matching.every(row => (row[3] ?? '').split(',').every(member => member === '' || member === owner[0]));
   } catch { return false; }
+}
+
+/**
+ * A POSIX ACL (`+` after the mode in `ls -ld`) can give another user write access
+ * while the group bits only show the ACL mask, so it voids the private-group exemption.
+ */
+export function checkLinuxLockACL(output: string): void {
+  if (!/^d[rwxstST-]{9}[. ]/.test(output.split('\n')[0] ?? '')) throw new Error('unsafe_recovery_lock_acl');
+}
+
+async function hasNoLinuxLockACL(path: string): Promise<boolean> {
+  try { checkLinuxLockACL(await lockSystemCommand('/bin/ls', ['-ld', path])); return true; } catch { return false; }
 }
 
 /** Darwin ACL allow entries can grant access despite mode 0700. Deny-only ACLs are safe. */
@@ -105,8 +134,11 @@ async function recoveryDirectory(input: string, privateRoot: boolean, createMiss
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
       info = await lstat(current);
     }
-    const groupWritable = !(privateRoot && current === path) && process.platform === 'linux' && info.uid === uid && (info.mode & 0o020) !== 0;
-    try { checkLockDirectory(info, uid, privateRoot && current === path, groupWritable && await isUserPrivateGroup(uid, info.gid)); }
+    const groupWritable = !(privateRoot && current === path) && process.platform === 'linux' && info.uid === uid && uid !== 0 && (info.mode & 0o020) !== 0;
+    try {
+      checkLockDirectory(info, uid, privateRoot && current === path,
+        groupWritable && await isUserPrivateGroup(uid, info.gid) && await hasNoLinuxLockACL(current));
+    }
     catch (error) {
       if ((error as Error).message === 'unsafe_recovery_lock_ancestor') {
         const mode = (info.mode & 0o7777).toString(8);

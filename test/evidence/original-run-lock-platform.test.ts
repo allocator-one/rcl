@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
 import { localLockScope } from '../../src/evidence/original-run/lock-scope.js';
 import * as lockScope from '../../src/evidence/original-run/lock-scope.js';
-import { checkDarwinLockACL, checkDarwinLockMount, checkLinuxLockFilesystem, checkLockDirectory, inspectRecoveryDirectory, isUserPrivateGroup } from '../../src/evidence/original-run/lock-path.js';
+import { checkDarwinLockACL, checkDarwinLockMount, checkLinuxLockACL, checkLinuxLockFilesystem, checkLockDirectory, inspectRecoveryDirectory, isUserPrivateGroup } from '../../src/evidence/original-run/lock-path.js';
 import { withRecoveryLock } from '../../src/evidence/original-run/journal.js';
 import { platformPath } from '../../src/telemetry/recovery/files.js';
 
@@ -66,13 +66,20 @@ it.each([
   if (item.safe) expect(check).not.toThrow(); else expect(check).toThrow('unsafe_recovery_lock_ancestor');
 });
 
+it.each([0o775, 0o770])('refuses a root-owned group-writable ancestor for a root caller even in a private group: %o', mode => {
+  const info = { uid: 0, mode, isDirectory: () => true, isSymbolicLink: () => false };
+  expect(() => checkLockDirectory(info, 0, false, true)).toThrow('unsafe_recovery_lock_ancestor');
+});
+
 it('keeps the private lock root at 0700 even in a private group', () => {
   const info = { uid: 501, mode: 0o770, isDirectory: () => true, isSymbolicLink: () => false };
   expect(() => checkLockDirectory(info, 501, true, true)).toThrow('unsafe_recovery_lock_root');
 });
 
-const files = (passwd: string, group: string) => async (path: string) => {
-  if (path === '/etc/passwd') return passwd; if (path === '/etc/group') return group; throw new Error('ENOENT');
+const filesOnly = 'passwd:         files systemd\ngroup:          files systemd\n';
+const files = (passwd: string, group: string, nsswitch: string | null = filesOnly) => async (path: string) => {
+  if (path === '/etc/passwd') return passwd; if (path === '/etc/group') return group;
+  if (path === '/etc/nsswitch.conf' && nsswitch !== null) return nsswitch; throw new Error('ENOENT');
 };
 it.each([
   { name: 'a user-private group without members', passwd: 'ann:x:1000:1000::/home/ann:/bin/sh', group: 'ann:x:1000:', safe: true },
@@ -86,6 +93,35 @@ it.each([
   await expect(isUserPrivateGroup(1000, 1000, files(item.passwd, item.group))).resolves.toBe(item.safe);
 });
 
+it('never treats the root account or group 0 as a user-private group', async () => {
+  await expect(isUserPrivateGroup(0, 0, files('root:x:0:0:root:/root:/bin/bash', 'root:x:0:'))).resolves.toBe(false);
+  await expect(isUserPrivateGroup(1000, 0, files('ann:x:1000:0::/h:/bin/sh', 'root:x:0:'))).resolves.toBe(false);
+});
+
+it.each([
+  { name: 'files and systemd with a lookup action', nsswitch: 'passwd: files [NOTFOUND=return] systemd\ngroup: files systemd\n', safe: true },
+  { name: 'files only', nsswitch: '# comment\npasswd: files\ngroup: files\nhosts: dns\n', safe: true },
+  { name: 'an SSSD passwd source', nsswitch: 'passwd: files sss\ngroup: files systemd\n', safe: false },
+  { name: 'an LDAP group source', nsswitch: 'passwd: files\ngroup: files ldap\n', safe: false },
+  { name: 'a compat NIS source', nsswitch: 'passwd: compat\ngroup: compat\n', safe: false },
+  { name: 'no group line', nsswitch: 'passwd: files\n', safe: false },
+  { name: 'no passwd line', nsswitch: 'group: files\n', safe: false },
+  { name: 'an unreadable nsswitch.conf', nsswitch: null, safe: false },
+])('requires local-file account sources: $name', async item => {
+  await expect(isUserPrivateGroup(1000, 1000, files('ann:x:1000:1000::/h:/bin/sh', 'ann:x:1000:', item.nsswitch))).resolves.toBe(item.safe);
+});
+
+it.each([
+  { name: 'a plain mode string', output: 'drwxrwxr-x 2 ann ann 4096 Nov 10 04:00 /home/ann\n', safe: true },
+  { name: 'an SELinux context marker', output: 'drwxrwxr-x. 2 ann ann 4096 Nov 10 04:00 /home/ann\n', safe: true },
+  { name: 'a POSIX ACL marker', output: 'drwxrwxr-x+ 2 ann ann 4096 Nov 10 04:00 /home/ann\n', safe: false },
+  { name: 'unrecognised output', output: 'ls: cannot access\n', safe: false },
+  { name: 'empty output', output: '', safe: false },
+])('refuses a group-writable ancestor with a Linux ACL: $name', item => {
+  const check = () => checkLinuxLockACL(item.output);
+  if (item.safe) expect(check).not.toThrow(); else expect(check).toThrow('unsafe_recovery_lock_acl');
+});
+
 it('fails closed when the account databases are unreadable', async () => {
   await expect(isUserPrivateGroup(1000, 1000, files('', ''))).resolves.toBe(false);
   await expect(isUserPrivateGroup(1000, 1000, async () => { throw new Error('EACCES'); })).resolves.toBe(false);
@@ -95,8 +131,20 @@ it.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('works under 
   const parent = await root(); await chmod(parent, 0o775); const work = vi.fn(async () => undefined);
   const info = await stat(parent);
   const outcome = withRecoveryLock(join(parent, 'child'), 'run', work);
-  if (await isUserPrivateGroup(info.uid, info.gid)) { await outcome; expect(work).toHaveBeenCalled(); }
+  const acl = (await promisify(execFile)('/bin/ls', ['-ld', parent])).stdout.split(' ')[0]!.includes('+');
+  if (!acl && await isUserPrivateGroup(info.uid, info.gid)) { await outcome; expect(work).toHaveBeenCalled(); }
   else { await expect(outcome).rejects.toThrow('unsafe_recovery_lock_ancestor'); expect(work).not.toHaveBeenCalled(); }
+});
+
+it.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('refuses a group-writable ancestor that has a POSIX ACL even in a private group', async () => {
+  const parent = await root(); await chmod(parent, 0o775); const work = vi.fn(async () => undefined);
+  const info = await stat(parent);
+  if (!await isUserPrivateGroup(info.uid, info.gid)) return;
+  const command = lockScope.lockSystemCommand;
+  vi.spyOn(lockScope, 'lockSystemCommand').mockImplementation(async (file, args, timeout) =>
+    file === '/bin/ls' && args.at(-1) === parent ? `drwxrwxr-x+ 2 ann ann 4096 Nov 10 04:00 ${parent}\n` : command(file, args, timeout));
+  await expect(withRecoveryLock(join(parent, 'child'), 'run', work)).rejects.toThrow(new RegExp(`unsafe_recovery_lock_ancestor.*${parent}`));
+  expect(work).not.toHaveBeenCalled();
 });
 
 it.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('names the offending path and the fix when an ancestor is group-writable for a shared group', async () => {
