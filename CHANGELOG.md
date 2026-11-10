@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Publish `@allocator-one/rcl` with an `npm-shrinkwrap.json` (RCL-208). The
+  tarball declared its ten runtime dependencies with caret ranges and no
+  lockfile, so each install resolved whatever was newest within them. `npm
+  pack` now generates a production-only shrinkwrap from `package-lock.json`
+  (`prepack`, removed again by `postpack`) and the release job refuses a
+  tarball without it. npm applies it to registry installs; a local tarball
+  install ignores it, see AGENTS.md.
+
 ## 4.5.41 - 2026-11-10
 
 - Admit explicitly bounded full-patch reviews above the ordinary 32-chunk limit
