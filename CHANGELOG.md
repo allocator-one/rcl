@@ -12,6 +12,22 @@
   when the answer came from another key than the one passed. A reference that
   names no key (`#N`, a bare number, an issue URL) is refused with
   `converge_target_form_unsupported` instead of reading as not launched.
+- Leave generated paths out of the reviewed patch of a PR (RCL-209). A release
+  that refreshes a bundled, served artifact (harness-cli#93 changed a 4.2 MB
+  OpenAPI spec and its generated help) could not be reviewed: the patch was
+  over the 64,000-line cap, so nothing could converge or pass the enforced
+  gate. For a PR whose full patch is over that cap, paths the base commit's
+  root `.gitattributes` marks `linguist-generated` now keep their file entry
+  (name, status, line counts and blob id, so `diff_sha256` still binds the full
+  head) but contribute no patch lines; a PR that fits is reviewed whole. The
+  base is the authority, never the head, so a PR cannot exempt its own files.
+  `run.target.left_out` records the reason, the commit, the count and up to 100
+  paths. Only a modified or deleted file is left out (an added or renamed one
+  stays reviewed), and so is any file below a directory with its own
+  `.gitattributes` (found in one recursive tree read; a truncated tree fails
+  the review) or under a rule the reader does not understand. A
+  `.gitattributes` the API cannot read fails the review instead of silently
+  reviewing a different patch.
 
 ## 4.5.33 - 2026-11-10
 
