@@ -47,6 +47,17 @@ describe('Git patch path identity', () => {
     expect(diff.files).toMatchObject([{ filename: 'copy.ts', status: 'copied',
       previousFilename: 'source.ts', patch: '@@ -1 +1 @@\n-old\n+new\n' }]);
   });
+
+  it('accepts a filename that validly contains U+FFFD when Git quotes its UTF-8 bytes', () => {
+    const quoted = '"a/f\\357\\277\\275.ts"';
+    const diff = parseDiffFromString(`diff --git ${quoted} ${quoted.replace('a/', 'b/')}\n--- ${quoted}\n+++ ${quoted.replace('a/', 'b/')}\n@@ -1 +1 @@\n-old\n+new\n`);
+    expect(diff.files).toMatchObject([{ filename: 'f�.ts' }]);
+  });
+
+  it('rejects a raw U+FFFD in an unquoted path, which can be lossy decoding', () => {
+    expect(() => parseDiffFromString('diff --git a/f�.ts b/f�.ts\n--- a/f�.ts\n+++ b/f�.ts\n@@ -1 +1 @@\n-old\n+new\n'))
+      .toThrow('Git patch filename identity cannot be proven');
+  });
 });
 
 async function git(cwd: string, ...args: string[]): Promise<void> {

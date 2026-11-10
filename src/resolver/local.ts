@@ -34,17 +34,20 @@ function decodePath(value: string): string {
         if (byte > 255) return invalidPath();
         bytes[length++] = byte;
       } else {
+        // A literal replacement character can mean lossy decoding; one that
+        // Git escaped as octal bytes is a real filename and decodes below.
+        if (token.includes('\uFFFD')) return invalidPath();
         length += bytes.write(token, length, 'utf8');
       }
       offset = tokens.lastIndex;
     }
     try { path = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, length)); }
     catch { return invalidPath(); }
-  } else if (/[\x00-\x1f\x7f"\\]/.test(value)) {
+  } else if (/[\x00-\x1f\x7f"\\\uFFFD]/.test(value)) {
+    // A raw replacement character can mean the Git output was decoded lossily.
     return invalidPath();
   }
-  // A replacement character can mean the Git output was decoded lossily.
-  if (!path || path.includes('\0') || path.includes('\uFFFD')) return invalidPath();
+  if (!path || path.includes('\0')) return invalidPath();
   return path;
 }
 
