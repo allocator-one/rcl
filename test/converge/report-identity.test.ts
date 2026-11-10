@@ -176,9 +176,13 @@ describe('report identity through native classification and telemetry', () => {
     const transition = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: mixed });
     const transitionModern = transition.findings.find(({ finding }) => finding.identity !== undefined)!;
     const transitionLegacy = transition.findings.find(({ finding }) => finding.identity === undefined)!;
-    expect(transitionModern).toMatchObject({ status: 'new' });
+    // The modern copy repeats the dismissed legacy claim, so the repeat-only
+    // round suppresses it (RCL-199) under its own identity, lending no verdict.
+    expect(transitionModern).toMatchObject({ status: 'suppressed',
+      suppressReason: expect.stringContaining(`repeats ${legacyIdentity}`) });
     expect(transitionLegacy).toMatchObject({ status: 'suppressed', identity: legacyIdentity });
     expect(transitionModern.identity).not.toBe(legacyIdentity);
+    expect((await loadConvergeRunState(dir, target))!.findings[transitionModern.identity]!.verdict).toBeUndefined();
 
     const [nextModern] = consensus([42], '00000000-0000-7000-8000-000000000003');
     const next = modernFirst
@@ -186,7 +190,8 @@ describe('report identity through native classification and telemetry', () => {
       : [{ ...nextModern!, identity: undefined }, nextModern!];
     const repeated = await processRoundReport({ gitCommonDir: dir, target, round: 3, findings: next });
     expect(repeated.findings.find(({ finding }) => finding.identity !== undefined))
-      .toMatchObject({ status: 'repeat', identity: transitionModern.identity });
+      .toMatchObject({ status: 'suppressed', identity: transitionModern.identity,
+        suppressReason: expect.stringContaining(`repeats ${legacyIdentity}`) });
     expect(repeated.findings.find(({ finding }) => finding.identity === undefined))
       .toMatchObject({ status: 'suppressed', identity: legacyIdentity });
   });

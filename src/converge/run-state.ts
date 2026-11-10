@@ -24,6 +24,7 @@ import type { GuardedLaunchState } from './launch-guard.js';
 import { validCycleVersion, type NativeReviewCycle } from './review-cycle.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import { bindRoundEvidence, processSemanticRound, verifyRoundBinding } from './semantic-state.js';
+import { descriptionTokenDigests, dismissedRepeatOf, repeatSuppressReason, type PriorClaim, type RepeatOf } from './repeat-guard.js';
 import { verdictClearsPending } from '../evidence/claim-recovery/validation/obligations.js';
 export { verdictClearsPending };
 import {
@@ -124,6 +125,10 @@ export interface FindingEntry {
   verdictSeverity?: string;
   claimDescriptor?: ClaimDescriptor;
   pendingRound?: number;
+  /** Hashed description tokens, for repeat matching (RCL-199). */
+  descriptionTokens?: string[];
+  /** The standing dismissal this claim repeated when first sighted (RCL-199). */
+  repeatOf?: RepeatOf;
 }
 
 export interface RoundCounts {
@@ -452,6 +457,53 @@ export function validateReportIdentityMappings(findings: readonly ReportIdentity
 }
 
 /**
+ * The dismissed claim this entry stands for before `round`: itself, or the
+ * root a suppressed repeat resolved to. A repeat's own later verdict wins.
+ */
+function standingDismissalRoot(state: ConvergeRunState, entry: FindingEntry, round: number): FindingEntry | undefined {
+  const root = entry.repeatOf && entry.verdict === undefined ? state.findings[entry.repeatOf.identity] : entry;
+  return root?.verdict === 'dismissed' && root.verdictRound! < round ? root : undefined;
+}
+
+/**
+ * Suppress this round's new gating findings when every one of them repeats a
+ * standing dismissal (RCL-199). Mutates the annotations, counts and entries.
+ */
+function suppressRepeatOnlyRound(state: ConvergeRunState, annotations: AnnotatedRoundFinding[], counts: RoundCounts,
+  round: number, lineWindow: number): void {
+  // A re-processed round decides again; its earlier decision must not stand.
+  for (const entry of Object.values(state.findings)) if (entry.firstRound === round) delete entry.repeatOf;
+  // A suppressed repeat without its own verdict is never a match target: a
+  // finding must resemble the dismissed root itself, so chained rewording
+  // cannot drift away from the dismissed claim's wording or lines.
+  const prior: PriorClaim[] = Object.values(state.findings)
+    .filter(entry => entry.firstRound < round && !(entry.repeatOf && entry.verdict === undefined))
+    .map(entry => {
+      const root = standingDismissalRoot(state, entry, round);
+      return { ...entry,
+        ...(root ? { dismissal: { identity: root.key, round: root.verdictRound!, severity: root.verdictSeverity ?? root.severity } } : {}) };
+    });
+  const actionable = annotations.filter(a =>
+    (a.status === 'new' || a.status === 'regating') && findingGatingReason(a.finding) !== 'none');
+  if (actionable.length === 0 || actionable.some(a => a.status !== 'new')) return;
+  const repeats = new Map<string, RepeatOf>();
+  for (const annotation of actionable) {
+    const repeatOf = dismissedRepeatOf(annotation.finding, prior, lineWindow);
+    if (!repeatOf) return;
+    repeats.set(annotation.identity, repeatOf);
+  }
+  for (const annotation of annotations) {
+    const repeatOf = repeats.get(annotation.identity);
+    if (!repeatOf || annotation.status !== 'new') continue;
+    state.findings[annotation.identity]!.repeatOf = repeatOf;
+    annotation.status = 'suppressed';
+    annotation.suppressReason = repeatSuppressReason(repeatOf);
+    counts.new--;
+    counts.suppressed++;
+  }
+}
+
+/**
  * Dedupe one round's findings against every prior round of this run,
  * enforce the round cap, and persist the updated identity ledger.
  *
@@ -736,6 +788,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
         endLine: finding.endLine,
         title: finding.title,
         claimTextSha256: textDigest,
+        descriptionTokens: descriptionTokenDigests(finding),
         identityOrigin: reportIdentity ? 'modern' : 'legacy',
         ...(reportIdentity ? { sourceReportIdentity: reportIdentity } : {}),
         severity: finding.severity,
@@ -775,6 +828,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
 
     let status: FindingStatus;
     let suppressReason: string | undefined;
+    const repeatRoot = entry.verdict === undefined ? standingDismissalRoot(state, entry, options.round) : undefined;
     if (entry.firstRound === options.round) {
       // A re-run of the round that first recorded this finding — it is this
       // round's own NEW finding being reprocessed, not a cross-round repeat.
@@ -794,6 +848,20 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
           (entry.verdictReason ? ` (${entry.verdictReason})` : '') +
           ' — a dismissal is terminal on its evidence; re-gating requires escalation to critical (RCL-30)';
       }
+    } else if (repeatRoot) {
+      // A suppressed repeat has no verdict of its own: it stands only while it
+      // still repeats its dismissed root. Escalation to critical or drift past
+      // the root's lines puts it back in front of triage (RCL-199, RCL-30).
+      const escalated = finding.severity === 'critical' && (repeatRoot.verdictSeverity ?? repeatRoot.severity) !== 'critical';
+      const nearRoot = finding.startLine <= repeatRoot.endLine + lineWindow && repeatRoot.startLine <= finding.endLine + lineWindow;
+      if (escalated || !nearRoot) {
+        status = 'regating';
+        counts.regating++;
+      } else {
+        status = 'suppressed';
+        counts.suppressed++;
+        suppressReason = repeatSuppressReason({ identity: repeatRoot.key, dismissedRound: repeatRoot.verdictRound! });
+      }
     } else {
       status = 'repeat';
       counts.repeat++;
@@ -806,6 +874,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     });
   }
 
+  suppressRepeatOnlyRound(state, [...pending.values()], counts, options.round, lineWindow);
   annotated.push(...options.findings.map((_, index) => pending.get(index)!));
 
   validateReportIdentityMappings(annotated);
@@ -849,6 +918,11 @@ export interface RoundResolution {
   unresolved: string[];
   /** Identities recorded fixed this round (any status — every fix changes the patch). */
   fixedThisRound: number;
+  /**
+   * Fixed identities that gated, or that this round's annotations cannot place.
+   * Only these force a fresh round: a fix to a non-gating finding never does (RCL-218).
+   */
+  gatingFixedThisRound: number;
   status: 'converged-dismissal-only' | 'fixes-pending-fresh-round' | 'unresolved';
   recoveryProjection?: RecoveryProjectionFreshness;
 }
@@ -978,9 +1052,14 @@ function deriveRoundResolution(state: ConvergeRunState, round: number,
     const unresolved = state.version === 3
       ? [...new Set([...effectivePendingIdentities(state), ...currentUnresolved])].sort()
       : currentUnresolved;
-    const fixedThisRound = Object.values(state.findings).filter(
-      (e) => e.verdict === 'fixed' && e.verdictRound === round
-    ).length;
+    const fixedIdentities = Object.values(state.findings)
+      .filter((e) => e.verdict === 'fixed' && e.verdictRound === round)
+      .map((e) => e.key);
+    const nonGatingIdentities = new Set(
+      state.lastAnnotations.identities.filter((a) => a.gating === 'none').map((a) => a.identity)
+    );
+    const fixedThisRound = fixedIdentities.length;
+    const gatingFixedThisRound = fixedIdentities.filter((key) => !nonGatingIdentities.has(key)).length;
     const admittedActionable = pendingBeforeTriage ?? admittedActionableBeforeTriage(state, round);
     const recoveryProjection = recoveryProjectionFreshness(state);
     return {
@@ -990,11 +1069,12 @@ function deriveRoundResolution(state: ConvergeRunState, round: number,
       ]).size : actionable.length,
       unresolved,
       fixedThisRound,
+      gatingFixedThisRound,
       ...(recoveryProjection ? { recoveryProjection } : {}),
       status:
         unresolved.length > 0
           ? 'unresolved'
-          : fixedThisRound > 0
+          : gatingFixedThisRound > 0
             ? 'fixes-pending-fresh-round'
             : 'converged-dismissal-only',
     };

@@ -4,14 +4,17 @@ import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { isReviewerArtifact, type ReviewerArtifact } from '../report/reviewer-artifact.js';
-import { withRecoveryLock, syncDirectory, writeExclusiveBytes } from '../evidence/original-run/journal.js';
+import { MAX_RECOVERY_CHECKPOINT_BYTES, MAX_RECOVERY_DOCUMENT_BYTES, openJournal, withRecoveryLock,
+  syncDirectory, writeExclusiveBytes, type JournalAppendCapacityEntry,
+  type ReadableJournal } from '../evidence/original-run/journal.js';
 import { prepareLockRoot, inspectRecoveryDirectory } from '../evidence/original-run/lock-path.js';
 import { platformPath, readStable, sha256 } from './recovery/files.js';
 import { normalizeUrl } from './credentials.js';
-import type { ArtifactBytes, ArtifactKind, RunEnvelope } from './envelope.js';
+import type { ArtifactBytes, ArtifactKind, ReviewerRecoveryDeclaration, RunEnvelope } from './envelope.js';
 import { MAX_ARTIFACT_BYTES, MAX_ENVELOPE_BYTES, validateRunEnvelope } from './envelope-validation.js';
 import type { FlushOptions, FlushSummary } from './outbox.js';
-import { HarnessSink, type RequestOptions, type SinkOutcome } from './sink.js';
+import { HarnessSink, MAX_RESPONSE_BYTES, type RequestOptions, type ReviewerRecoveryPrincipal,
+  type SinkOutcome } from './sink.js';
 
 export const REVIEWER_OUTBOX_DIR = 'reviewer-outbox';
 const uuid = z.string().regex(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![\s\S])/i);
@@ -33,6 +36,7 @@ export interface RetainedReviewerRecoverySelection {
   reviewerArtifactSha256: string;
   reviewerArtifactByteLength: number;
   reviewerArtifactBytes: string;
+  reviewerRecovery: ReviewerRecoveryDeclaration;
 }
 export interface RetainedReviewerRecoveryPreview {
   version: 1;
@@ -47,10 +51,67 @@ export interface RetainedReviewerRecoveryPreview {
   report_md?: { sha256: string; bytes: number };
   reviewer: { sha256: string; bytes: number };
 }
+export interface RetainedReviewerRecoveryDestination {
+  host: string;
+  credentialKind: 'login' | 'env';
+  activationProtocol: 1;
+  principal: ReviewerRecoveryPrincipal;
+}
+interface RetainedReviewerRecoveryOperation {
+  mode: 'apply' | 'resume';
+  operationId: string;
+  recoveryManifestSha256: string;
+  destination: RetainedReviewerRecoveryDestination;
+  journal: ReadableJournal;
+}
+export interface RetainedReviewerRecoveryOperationInput extends Omit<RetainedReviewerRecoveryOperation,
+  'journal'> {
+  manifestPath: string;
+}
+export interface RetainedReviewerRecoveryPreparation {
+  preview: RetainedReviewerRecoveryPreview;
+  envelopeBytes: string;
+  reportMarkdownBytes?: string;
+}
+const putOutcomePhases = ['report_json_put_outcome', 'report_md_put_outcome', 'reviewer_put_outcome'] as const;
+const MAX_PUT_RETRIES_PER_ARTIFACT = 100;
+const MAX_PUT_OUTCOMES_PER_ARTIFACT = 1 + MAX_PUT_RETRIES_PER_ARTIFACT;
+const PUT_COMPLETION_RESERVATION_CHECKPOINTS = 7;
+const PUT_COMPLETION_RESERVATION_BYTES = PUT_COMPLETION_RESERVATION_CHECKPOINTS * MAX_RECOVERY_CHECKPOINT_BYTES;
+const PUT_COMPLETION_AFTER_INTENT_CHECKPOINTS = PUT_COMPLETION_RESERVATION_CHECKPOINTS - 1;
+const PUT_COMPLETION_AFTER_INTENT_BYTES = PUT_COMPLETION_AFTER_INTENT_CHECKPOINTS * MAX_RECOVERY_CHECKPOINT_BYTES;
+// Sink response bodies are bounded before classification. The retained outcome
+// keeps only kind/status/error. Invalid UTF-8 can expand to one three-byte
+// replacement character per input byte, with room for its checkpoint wrapper.
+const MAX_OUTCOME_CHECKPOINT_BYTES = 3 * MAX_RESPONSE_BYTES + 4096;
+function putOutcomeAttempt(phase: string): { base: typeof putOutcomePhases[number]; attempt: number } | undefined {
+  for (const base of putOutcomePhases) {
+    if (phase === base) return { base, attempt: 1 };
+    if (!phase.startsWith(`${base}_`)) continue;
+    const suffix = phase.slice(base.length + 1);
+    if (!/^(?:[2-9]|[1-9][0-9]+)$/.test(suffix)) return undefined;
+    const attempt = Number(suffix);
+    return Number.isSafeInteger(attempt) && attempt >= 2 ? { base, attempt } : undefined;
+  }
+  return undefined;
+}
+const isOutcomePhase = (phase: string) => phase === 'activation_post_outcome' || putOutcomeAttempt(phase) !== undefined;
+const operationPhases = new Set(['prepared', 'activation_post_intent', 'activation_post_outcome', ...putOutcomePhases, 'activation_post_uncertain',
+  'envelope_verified', 'report_json_put_intent', 'report_json_verified',
+  'report_md_put_intent', 'report_md_verified', 'reviewer_put_intent',
+  'reviewer_verified', 'recovery_acknowledged', 'complete']);
+const outcomeSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('ok'), http_status: z.number().int() }).strict(),
+  z.object({ kind: z.literal('disabled') }).strict(),
+  z.object({ kind: z.literal('conflict') }).strict(),
+  z.object({ kind: z.literal('rejected'), http_status: z.number().int(), error: z.string() }).strict(),
+  z.object({ kind: z.literal('unavailable'), http_status: z.number().int().optional() }).strict(),
+]);
 const files = { report_json: 'report.json', report_md: 'report.md' } as const;
 const ref = (text: string) => ({ sha256: sha256(text), bytes: Buffer.byteLength(text) });
 function fail(reason: string): never { throw new Error(`reviewer_delivery_${reason}`); }
 function safeFailure(error: unknown): string {
+  if (error instanceof Error && error.message === 'recovery_run_locked') return 'reviewer_delivery_recovery_run_locked';
   return error instanceof Error && /^reviewer_delivery_[a-z_]+$/.test(error.message) ? error.message : 'reviewer_delivery_local_refusal';
 }
 function accepted<T>(outcome: SinkOutcome<T>): T {
@@ -113,9 +174,11 @@ export class ReviewerDeliveryQueue {
   }
 
   /** Initial delivery is the only path allowed to create an as-yet unknown run. */
-  async deliver(input: ReviewerDeliveryInput, options: ReviewerDeliveryOptions = {}): Promise<void> {
+  async deliver(input: ReviewerDeliveryInput, options: ReviewerDeliveryOptions = {}, authorizeTransfer?: () => Promise<void>): Promise<void> {
     const entry = this.snapshot(input), request = budget(options);
     await this.lock(entry.manifest.runId, async () => {
+      await this.assertGenericDeliveryAllowed(entry.manifest.runId);
+      await authorizeTransfer?.();
       request(); await this.save(entry);
       // An existing manifest might belong to an earlier process/principal.
       // Only this invocation's first publication can use the creation path.
@@ -142,6 +205,7 @@ export class ReviewerDeliveryQueue {
         request();
         await this.lock(id, async () => {
           const entry = await this.load(id);
+          await this.assertGenericDeliveryAllowed(id);
           if (await this.acknowledged(entry)) return;
           await authorizeTransfer?.();
           request(); await this.transfer(entry, sink, request, 'retry'); summary.delivered.push(entry.manifest.runId);
@@ -163,10 +227,75 @@ export class ReviewerDeliveryQueue {
     catch { return false; }
   }
 
+  /** Presence alone blocks legacy delivery; malformed retained state must fail closed too. */
+  async hasEntry(runId: string): Promise<boolean> {
+    if (!uuid.safeParse(runId).success) return false;
+    try { await lstat(join(this.root, runId.toLowerCase())); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  }
+
+  /** Generic retry paths must never bypass an explicit retained activation operation. */
+  async assertGenericDeliveryAllowed(runId: string): Promise<void> {
+    if (!uuid.safeParse(runId).success) fail('invalid_run');
+    try { await lstat(join(this.root, runId.toLowerCase(), 'activation-intent.json')); fail('explicit_activation_required'); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'reviewer_delivery_explicit_activation_required') throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+
+  /** Hold the run lock across a selected generic transmission so activation cannot race it. */
+  async withGenericDeliveryAllowed<T>(runId: string, work: () => Promise<T>): Promise<T> {
+    return this.lock(runId, async () => {
+      await this.assertGenericDeliveryAllowed(runId);
+      return work();
+    });
+  }
+
   /** Read-only exact activation proposal derived from authenticated local lineage. */
   async previewRecovery(selection: RetainedReviewerRecoverySelection): Promise<RetainedReviewerRecoveryPreview> {
+    return (await this.prepareRecovery(selection)).preview;
+  }
+
+  recoveryJournalPath(runId: string, operationId: string): string {
+    if (!uuid.safeParse(runId).success || !uuid.safeParse(operationId).success) fail('recovery_operation_mismatch');
+    return join(this.root, runId.toLowerCase(), 'recovery.journal');
+  }
+
+  /** Read-only retained bytes after checkpoint lineage and private outbox authentication. */
+  async prepareRecovery(selection: RetainedReviewerRecoverySelection): Promise<RetainedReviewerRecoveryPreparation> {
     if (!selection || typeof selection !== 'object' || !uuid.safeParse(selection.runId).success) fail('invalid_recovery_selection');
-    return this.lock(selection.runId, async () => this.recoveryPreview(await this.load(selection.runId), selection));
+    return this.lock(selection.runId, async () => {
+      const entry = await this.load(selection.runId);
+      return { preview: this.recoveryPreview(entry, selection), envelopeBytes: entry.envelopeBytes,
+        ...(entry.artifacts.report_md === undefined ? {} : { reportMarkdownBytes: entry.artifacts.report_md }) };
+    });
+  }
+
+  /** Reject conflicting local acknowledgements before notice, journal creation, or transport. */
+  async preflightRecoveryAcknowledgements(
+    selection: RetainedReviewerRecoverySelection,
+    preview: RetainedReviewerRecoveryPreview,
+    operationInput?: RetainedReviewerRecoveryOperationInput,
+  ): Promise<void> {
+    if (!selection || typeof selection !== 'object' || !uuid.safeParse(selection.runId).success) fail('invalid_recovery_selection');
+    await this.lock(selection.runId, async () => {
+      const entry = await this.load(selection.runId);
+      if (!isDeepStrictEqual(this.recoveryPreview(entry, selection), preview)) fail('recovery_selection_mismatch');
+      if (operationInput === undefined) {
+        await this.assertOrdinaryAcknowledgement(entry);
+        if (await this.optionalPrivateRead(join(entry.directory, 'recovery-acknowledged.json'), 4096) !== undefined) {
+          fail('immutable_conflict');
+        }
+        return;
+      }
+      const operation = await this.resolveRecoveryOperation(operationInput, selection.runId);
+      this.validateRecoveryOperation(entry, operation);
+      const activationIntent = this.activationIntent(entry, operation);
+      const recoveryAck = this.recoveryAcknowledgement(entry, operation, activationIntent);
+      this.assertRecoveryJournalAcknowledgements(operation, recoveryAck);
+      await this.assertRecoveryAcknowledgements(entry, recoveryAck);
+    });
   }
 
   /** Activate an exact retained entry. Generic flush never receives this creation authority. */
@@ -174,6 +303,18 @@ export class ReviewerDeliveryQueue {
     sink: HarnessSink,
     selection: RetainedReviewerRecoverySelection,
     preview: RetainedReviewerRecoveryPreview,
+    operationInput: RetainedReviewerRecoveryOperationInput,
+    options: ReviewerDeliveryOptions = {},
+  ): Promise<void> {
+    await this.applyRecoveryOperation(sink, selection, preview,
+      () => this.resolveRecoveryOperation(operationInput, selection.runId), options);
+  }
+
+  private async applyRecoveryOperation(
+    sink: HarnessSink,
+    selection: RetainedReviewerRecoverySelection,
+    preview: RetainedReviewerRecoveryPreview,
+    resolveOperation: () => Promise<RetainedReviewerRecoveryOperation>,
     options: ReviewerDeliveryOptions = {},
   ): Promise<void> {
     if (!selection || typeof selection !== 'object' || !uuid.safeParse(selection.runId).success) fail('invalid_recovery_selection');
@@ -182,8 +323,8 @@ export class ReviewerDeliveryQueue {
       const entry = await this.load(selection.runId);
       const current = this.recoveryPreview(entry, selection);
       if (!isDeepStrictEqual(current, preview)) fail('recovery_selection_mismatch');
-      if (await this.acknowledged(entry)) return;
-      request(); await this.transfer(entry, sink, request, 'recovery');
+      const operation = await resolveOperation();
+      request(); await this.recover(entry, sink, request, operation);
     });
   }
 
@@ -192,9 +333,10 @@ export class ReviewerDeliveryQueue {
     sink: HarnessSink,
     selection: RetainedReviewerRecoverySelection,
     preview: RetainedReviewerRecoveryPreview,
+    operation: RetainedReviewerRecoveryOperationInput,
     options: ReviewerDeliveryOptions = {},
   ): Promise<void> {
-    await this.applyRecovery(sink, selection, preview, options);
+    await this.applyRecovery(sink, selection, preview, operation, options);
   }
 
   private snapshot(input: ReviewerDeliveryInput): Entry {
@@ -210,6 +352,19 @@ export class ReviewerDeliveryQueue {
   }
   private async lock<T>(runId: string, work: () => Promise<T>): Promise<T> {
     return withRecoveryLock(join(this.root, 'locks'), runId.toLowerCase(), work);
+  }
+
+  private async resolveRecoveryOperation(
+    operation: RetainedReviewerRecoveryOperationInput,
+    runId: string,
+  ): Promise<RetainedReviewerRecoveryOperation> {
+    const manifestPath = platformPath(operation.manifestPath);
+    const retained = await readStable(manifestPath, MAX_RECOVERY_DOCUMENT_BYTES, { sync: true });
+    if (retained.sha256 !== operation.recoveryManifestSha256) fail('manifest_digest_mismatch');
+    return { mode: operation.mode, operationId: operation.operationId,
+      recoveryManifestSha256: operation.recoveryManifestSha256, destination: operation.destination,
+      journal: await openJournal(this.recoveryJournalPath(runId, operation.operationId), operation.recoveryManifestSha256,
+        operation.operationId, operation.mode) };
   }
   private async save(entry: Entry): Promise<void> {
     await prepareLockRoot(this.root);
@@ -229,7 +384,9 @@ export class ReviewerDeliveryQueue {
     const manifestBytes = await privateRead(join(directory, 'manifest.json'), 4096);
     const manifest = manifestSchema.parse(JSON.parse(manifestBytes));
     if (manifest.runId.toLowerCase() !== id.toLowerCase()) fail('invalid_run');
-    const allowed = ['manifest.json', 'envelope.json', 'reviewer-artifact.json', 'report.json', 'acknowledged.json', ...(manifest.report_md ? ['report.md'] : [])];
+    const allowed = ['manifest.json', 'envelope.json', 'reviewer-artifact.json', 'report.json', 'acknowledged.json',
+      'activation-intent.json', 'recovery-acknowledged.json', 'recovery.journal',
+      ...(manifest.report_md ? ['report.md'] : [])];
     if ((await readdir(directory)).some(name => !allowed.includes(name))) fail('unknown_file');
     const envelopeBytes = await privateRead(join(directory, 'envelope.json'), MAX_ENVELOPE_BYTES);
     const entry: Entry = { manifest, manifestBytes, directory, envelopeBytes, envelope: JSON.parse(envelopeBytes), privateBytes: await privateRead(join(directory, 'reviewer-artifact.json'), MAX_ARTIFACT_BYTES),
@@ -245,6 +402,7 @@ export class ReviewerDeliveryQueue {
       selection.reportSha256 !== report.sha256 || selection.reportByteLength !== report.bytes ||
       selection.reviewerArtifactSha256 !== reviewer.sha256 || selection.reviewerArtifactByteLength !== reviewer.bytes ||
       entry.artifacts.report_json !== selection.reportBytes || entry.privateBytes !== selection.reviewerArtifactBytes ||
+      !isDeepStrictEqual(entry.envelope.reviewer_recovery, selection.reviewerRecovery) ||
       !isDeepStrictEqual(entry.manifest.report_json, report) || !isDeepStrictEqual(entry.manifest.reviewer, reviewer)) {
       fail('recovery_selection_mismatch');
     }
@@ -256,19 +414,64 @@ export class ReviewerDeliveryQueue {
       reviewer: { ...entry.manifest.reviewer } };
   }
   private ack(entry: Entry): string { return JSON.stringify({ version: 1, runId: entry.manifest.runId, manifestSha256: sha256(entry.manifestBytes) }); }
+  private async optionalPrivateRead(path: string, limit: number): Promise<string | undefined> {
+    try { return await privateRead(path, limit); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  }
+  private async assertOrdinaryAcknowledgement(entry: Entry): Promise<void> {
+    const bytes = await this.optionalPrivateRead(join(entry.directory, 'acknowledged.json'), 4096);
+    if (bytes !== undefined && bytes !== this.ack(entry)) fail('immutable_conflict');
+  }
+  private activationIntent(entry: Entry, operation: RetainedReviewerRecoveryOperation): string {
+    return JSON.stringify({ version: 1, runId: entry.manifest.runId, operationId: operation.operationId,
+      recoveryManifestSha256: operation.recoveryManifestSha256, envelopeSha256: entry.manifest.envelope.sha256 });
+  }
+  private validateRecoveryOperation(entry: Entry, operation: RetainedReviewerRecoveryOperation): void {
+    const m = entry.manifest;
+    if (!operation || !uuid.safeParse(operation.operationId).success || !digest.safeParse(operation.recoveryManifestSha256).success ||
+      !operation.journal || (operation.mode !== 'apply' && operation.mode !== 'resume') ||
+      operation.destination.host !== m.host || operation.destination.credentialKind !== m.credentialKind ||
+      operation.destination.activationProtocol !== 1) fail('recovery_operation_mismatch');
+  }
+  private recoveryOutcomeDigest(operation: RetainedReviewerRecoveryOperation): string {
+    const outcomes = operation.journal.checkpoints()
+      .filter(checkpoint => isOutcomePhase(checkpoint.phase))
+      .map(checkpoint => {
+        const parsed = outcomeSchema.safeParse(checkpoint.data);
+        if (!parsed.success || !isDeepStrictEqual(parsed.data, checkpoint.data)) fail('journal_checkpoint_conflict');
+        return { phase: checkpoint.phase, data: parsed.data };
+      });
+    return sha256(JSON.stringify(outcomes));
+  }
+  private recoveryAcknowledgement(entry: Entry, operation: RetainedReviewerRecoveryOperation, activationIntent: string): string {
+    const m = entry.manifest;
+    return JSON.stringify({ version: 1, operationId: operation.operationId,
+      recoveryManifestSha256: operation.recoveryManifestSha256, outboxManifestSha256: sha256(entry.manifestBytes),
+      activationIntentSha256: sha256(activationIntent), journalOutcomesSha256: this.recoveryOutcomeDigest(operation),
+      destination: operation.destination, envelope: m.envelope, report_json: m.report_json,
+      ...(m.report_md ? { report_md: m.report_md } : {}), reviewer: m.reviewer });
+  }
+  private assertRecoveryJournalAcknowledgements(operation: RetainedReviewerRecoveryOperation, recoveryAck: string): void {
+    const acknowledgement = operation.journal.checkpoints().find(checkpoint => checkpoint.phase === 'recovery_acknowledged');
+    if (acknowledgement && !isDeepStrictEqual(acknowledgement.data, JSON.parse(recoveryAck))) fail('journal_checkpoint_conflict');
+    const complete = operation.journal.checkpoints().find(checkpoint => checkpoint.phase === 'complete');
+    if (complete && !isDeepStrictEqual(complete.data, { recovery_ack_sha256: sha256(recoveryAck) })) fail('journal_checkpoint_conflict');
+  }
+  private async assertRecoveryAcknowledgements(entry: Entry, recoveryAck: string): Promise<void> {
+    await this.assertOrdinaryAcknowledgement(entry);
+    const bytes = await this.optionalPrivateRead(join(entry.directory, 'recovery-acknowledged.json'), 4096);
+    if (bytes !== undefined && bytes !== recoveryAck) fail('immutable_conflict');
+  }
   private async acknowledged(entry: Entry): Promise<boolean> {
     try { if (await privateRead(join(entry.directory, 'acknowledged.json'), 4096) !== this.ack(entry)) fail('invalid_ack'); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
   }
-  private async transfer(entry: Entry, sink: HarnessSink, request: () => RequestOptions, mode: 'initial' | 'retry' | 'recovery'): Promise<void> {
+  private async transfer(entry: Entry, sink: HarnessSink, request: () => RequestOptions, mode: 'initial' | 'retry'): Promise<void> {
     const m = entry.manifest;
     if (sink.baseUrl !== m.host || sink.credentialSource !== m.credentialKind) fail('credential_mismatch');
     accepted(await sink.checkReviewerRecovery(request()));
     let read = mode === 'initial' ? undefined : await sink.getReviewerArtifact(m.runId, m.reviewer, request());
-    const absentRecovery = mode === 'recovery' && read?.kind === 'rejected' && read.httpStatus === 404 &&
-      read.error === 'reviewer_artifact_http_404';
-    if (read && read.kind !== 'ok' && read.kind !== 'pending' && !absentRecovery) accepted(read);
-    if (absentRecovery) read = undefined;
+    if (read && read.kind !== 'ok' && read.kind !== 'pending') accepted(read);
     // A matching private read is the server's completed admission proof: it
     // validates the retained ordinary/private pair, so replaying the ordinary
     // uploads would only repeat already acknowledged work after a lost local ACK.
@@ -296,6 +499,313 @@ export class ReviewerDeliveryQueue {
     if (read.kind === 'pending') fail('unavailable');
     if (!accepted(read).bytes.equals(Buffer.from(entry.privateBytes))) fail('private_mismatch');
     await publish(join(entry.directory, 'acknowledged.json'), this.ack(entry));
+  }
+
+  private async recover(
+    entry: Entry,
+    sink: HarnessSink,
+    request: () => RequestOptions,
+    operation: RetainedReviewerRecoveryOperation,
+  ): Promise<void> {
+    const m = entry.manifest;
+    this.validateRecoveryOperation(entry, operation);
+    if (sink.baseUrl !== m.host || sink.credentialSource !== m.credentialKind) fail('recovery_operation_mismatch');
+    const checkpoints = operation.journal.checkpoints();
+    const phases = new Set<string>();
+    const putAttempts = new Map<typeof putOutcomePhases[number], number>();
+    const putHistories = new Map<typeof putOutcomePhases[number], Array<{ index: number; data: z.infer<typeof outcomeSchema> }>>();
+    const phasePositions = new Map<string, number>();
+    for (const [index, checkpoint] of checkpoints.entries()) {
+      if (checkpoint.phase === 'interrupted_checkpoints_retained') continue;
+      const putAttempt = putOutcomeAttempt(checkpoint.phase);
+      if (!operationPhases.has(checkpoint.phase) && putAttempt === undefined) fail('journal_checkpoint_conflict');
+      if (phases.has(checkpoint.phase)) fail('journal_checkpoint_conflict');
+      phases.add(checkpoint.phase);
+      phasePositions.set(checkpoint.phase, index);
+      if (isOutcomePhase(checkpoint.phase)) {
+        const parsed = outcomeSchema.safeParse(checkpoint.data);
+        if (!parsed.success || !isDeepStrictEqual(parsed.data, checkpoint.data)) fail('journal_checkpoint_conflict');
+      }
+      if (putAttempt !== undefined) {
+        const expected = (putAttempts.get(putAttempt.base) ?? 0) + 1;
+        if (putAttempt.attempt !== expected) fail('journal_checkpoint_conflict');
+        putAttempts.set(putAttempt.base, expected);
+        const parsed = outcomeSchema.safeParse(checkpoint.data);
+        if (!parsed.success) fail('journal_checkpoint_conflict');
+        const history = putHistories.get(putAttempt.base) ?? [];
+        history.push({ index, data: parsed.data });
+        putHistories.set(putAttempt.base, history);
+      }
+    }
+    for (const base of putOutcomePhases) {
+      const prefix = base.slice(0, -'_put_outcome'.length);
+      const intentPosition = phasePositions.get(`${prefix}_put_intent`);
+      const verifiedPosition = phasePositions.get(`${prefix}_verified`);
+      const history = putHistories.get(base) ?? [];
+      if (history.length > 0 && intentPosition === undefined) fail('journal_checkpoint_conflict');
+      if (intentPosition !== undefined && verifiedPosition !== undefined && intentPosition > verifiedPosition) {
+        fail('journal_checkpoint_conflict');
+      }
+      let terminal = false;
+      for (const item of history) {
+        if (item.index < intentPosition! || (verifiedPosition !== undefined && item.index > verifiedPosition) || terminal) {
+          fail('journal_checkpoint_conflict');
+        }
+        if (item.data.kind !== 'unavailable') terminal = true;
+      }
+      if (history.length > MAX_PUT_OUTCOMES_PER_ARTIFACT) fail('put_retry_limit');
+    }
+    const appendOnce = async (phase: string, data: unknown) => {
+      const normalized = JSON.parse(JSON.stringify(data)) as unknown;
+      const matches = operation.journal.checkpoints().filter(checkpoint => checkpoint.phase === phase);
+      if (matches.length === 0) await operation.journal.append(phase, normalized);
+      else if (matches.length !== 1 || !isDeepStrictEqual(matches[0]!.data, normalized)) fail('journal_checkpoint_conflict');
+    };
+    const appendPutOutcome = async (phase: string, data: unknown) => {
+      if (!putOutcomePhases.includes(phase as typeof putOutcomePhases[number])) fail('journal_checkpoint_conflict');
+      const attempts = operation.journal.checkpoints().filter(checkpoint => putOutcomeAttempt(checkpoint.phase)?.base === phase).length;
+      if (attempts >= MAX_PUT_OUTCOMES_PER_ARTIFACT) fail('put_retry_limit');
+      const attemptPhase = attempts === 0 ? phase : `${phase}_${attempts + 1}`;
+      await operation.journal.append(attemptPhase, JSON.parse(JSON.stringify(data)) as unknown);
+    };
+    const assertPutMayProceed = (phase: typeof putOutcomePhases[number]) => {
+      const verifiedPhase = `${phase.slice(0, -'_put_outcome'.length)}_verified`;
+      if (operation.journal.checkpoints().some(checkpoint => checkpoint.phase === verifiedPhase)) fail('unavailable');
+      const attempts = operation.journal.checkpoints()
+        .filter(checkpoint => putOutcomeAttempt(checkpoint.phase)?.base === phase);
+      const previous = attempts.at(-1);
+      if (!previous) return;
+      const parsed = outcomeSchema.safeParse(previous.data);
+      if (!parsed.success || !isDeepStrictEqual(parsed.data, previous.data)) fail('journal_checkpoint_conflict');
+      if (parsed.data.kind === 'unavailable') {
+        if (attempts.length >= MAX_PUT_OUTCOMES_PER_ARTIFACT) fail('put_retry_limit');
+        return;
+      }
+      fail(parsed.data.kind === 'ok' ? 'unavailable' : 'refused');
+    };
+    const assertPutCapacityBeforeIntent = (prefix: 'report_json' | 'report_md' | 'reviewer') => {
+      const intentExists = operation.journal.checkpoints().some(checkpoint => checkpoint.phase === `${prefix}_put_intent`);
+      operation.journal.assertAppendCapacity(
+        intentExists ? PUT_COMPLETION_AFTER_INTENT_CHECKPOINTS : PUT_COMPLETION_RESERVATION_CHECKPOINTS,
+        intentExists ? PUT_COMPLETION_AFTER_INTENT_BYTES : PUT_COMPLETION_RESERVATION_BYTES,
+      );
+    };
+    const assertExisting = (phase: string, data: unknown) => {
+      const checkpoint = operation.journal.checkpoints().find(candidate => candidate.phase === phase);
+      if (checkpoint && !isDeepStrictEqual(checkpoint.data, JSON.parse(JSON.stringify(data)))) fail('journal_checkpoint_conflict');
+    };
+    const outcome = (value: SinkOutcome<unknown>) => {
+      const rawError = (value as { error?: unknown }).error;
+      return { kind: value.kind,
+        ...('httpStatus' in value ? { http_status: value.httpStatus } : {}),
+        ...(rawError !== undefined ? { error: typeof rawError === 'string' ? rawError : 'malformed_response' } : {}) };
+    };
+    const assertDestination = async () => {
+      const capability = accepted(await sink.checkReviewerRecoveryActivation(request()));
+      if (capability.protocol !== operation.destination.activationProtocol ||
+        !isDeepStrictEqual(capability.principal, operation.destination.principal)) fail('principal_mismatch');
+    };
+    const privateReadback = async () => sink.getReviewerArtifact(m.runId, m.reviewer, request());
+    const activationIntent = this.activationIntent(entry, operation);
+    const initialRecoveryAck = this.recoveryAcknowledgement(entry, operation, activationIntent);
+    const activationIntentPath = join(entry.directory, 'activation-intent.json');
+    let activationIntentPresent = false;
+    try {
+      if (await privateRead(activationIntentPath, 4096) !== activationIntent) fail('activation_operation_conflict');
+      activationIntentPresent = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const ensureActivationIntent = async () => {
+      if (activationIntentPresent) return;
+      await publish(activationIntentPath, activationIntent);
+      activationIntentPresent = true;
+    };
+    const absent = (value: Awaited<ReturnType<typeof privateReadback>>) => value.kind === 'rejected' &&
+      value.httpStatus === 404 && value.error === 'reviewer_artifact_http_404';
+    const inspectOrdinary = async (kind: 'report_json' | 'report_md', bytes: string): Promise<'exact' | 'missing' | 'mismatch'> => {
+      const read = await sink.getArtifact(m.runId, kind, Buffer.byteLength(bytes), request());
+      if (read.kind === 'ok') return read.value.bytes.equals(Buffer.from(bytes)) ? 'exact' : 'mismatch';
+      if (read.kind === 'rejected' && read.httpStatus === 404) return 'missing';
+      accepted(read);
+      return 'mismatch';
+    };
+    const assertEnvelopeReceipt = (receipt: Awaited<ReturnType<typeof sink.getRunReceipt>>) => {
+      if (receipt.kind === 'recorded') return;
+      if (receipt.kind === 'unavailable') fail('unavailable');
+      fail(receipt.kind === 'absent' ? 'envelope_receipt_absent' : 'envelope_receipt_mismatch');
+    };
+
+    assertExisting('prepared', { outbox_manifest_sha256: sha256(entry.manifestBytes), destination: operation.destination });
+    assertExisting('activation_post_intent', { envelope: m.envelope });
+    assertExisting('activation_post_uncertain', { reason: 'intent_without_remote_readback' });
+    assertExisting('report_json_put_intent', m.report_json);
+    if (m.report_md) assertExisting('report_md_put_intent', m.report_md);
+    assertExisting('reviewer_put_intent', m.reviewer);
+    assertExisting('envelope_verified', { sha256: m.envelope.sha256, artifacts_declared: entry.envelope.artifacts_declared });
+    assertExisting('report_json_verified', m.report_json);
+    if (m.report_md) assertExisting('report_md_verified', m.report_md);
+    assertExisting('reviewer_verified', m.reviewer);
+    this.assertRecoveryJournalAcknowledgements(operation, initialRecoveryAck);
+    await this.assertRecoveryAcknowledgements(entry, initialRecoveryAck);
+
+    await assertDestination();
+    let read = await privateReadback();
+    if (read.kind !== 'ok' && read.kind !== 'pending' && !absent(read)) accepted(read);
+    if (read.kind === 'ok' && !read.value.bytes.equals(Buffer.from(entry.privateBytes))) fail('private_mismatch');
+    const plannedEnvelopeReceipt = await sink.getRunReceipt(entry.envelope, entry.envelopeBytes, request());
+    if (!absent(read)) assertEnvelopeReceipt(plannedEnvelopeReceipt);
+    const hasCheckpoint = (phase: string) => operation.journal.checkpoints()
+      .some(checkpoint => checkpoint.phase === phase);
+    const appendPlan: JournalAppendCapacityEntry[] = [];
+    const putBoundaries: Array<{ index: number; reservation: number }> = [];
+    const planExact = (phase: string, data: unknown) => {
+      if (!hasCheckpoint(phase)) appendPlan.push({ phase, data });
+    };
+    const planOutcome = () => appendPlan.push({ maximumBytes: MAX_OUTCOME_CHECKPOINT_BYTES });
+    const planVerified = (prefix: 'report_json' | 'report_md' | 'reviewer', data: unknown) => {
+      planExact(`${prefix}_verified`, data);
+    };
+    const planPut = (prefix: 'report_json' | 'report_md' | 'reviewer', data: unknown) => {
+      const intentExists = hasCheckpoint(`${prefix}_put_intent`);
+      const index = appendPlan.length;
+      planExact(`${prefix}_put_intent`, data);
+      planOutcome();
+      planVerified(prefix, data);
+      putBoundaries.push({ index, reservation: intentExists ? PUT_COMPLETION_AFTER_INTENT_CHECKPOINTS :
+        PUT_COMPLETION_RESERVATION_CHECKPOINTS });
+    };
+    planExact('prepared', { outbox_manifest_sha256: sha256(entry.manifestBytes), destination: operation.destination });
+    const activationUncertain = absent(read) && hasCheckpoint('activation_post_intent');
+    if (absent(read)) {
+      if (activationUncertain) planExact('activation_post_uncertain', { reason: 'intent_without_remote_readback' });
+      else {
+        planExact('activation_post_intent', { envelope: m.envelope });
+        planOutcome();
+      }
+    }
+    if (!activationUncertain) planExact('envelope_verified', {
+      sha256: m.envelope.sha256, artifacts_declared: entry.envelope.artifacts_declared,
+    });
+    for (const kind of ['report_json', 'report_md'] as const) {
+      const bytes = entry.artifacts[kind]; if (bytes === undefined) continue;
+      const state = await inspectOrdinary(kind, bytes);
+      if (state === 'mismatch') fail('ordinary_mismatch');
+      if (state === 'missing') {
+        assertPutMayProceed(`${kind}_put_outcome`);
+        if (!activationUncertain) planPut(kind, m[kind]);
+      } else if (!activationUncertain) planVerified(kind, m[kind]);
+    }
+    if (read.kind === 'pending' || absent(read)) {
+      assertPutMayProceed('reviewer_put_outcome');
+      if (!activationUncertain) planPut('reviewer', m.reviewer);
+    } else if (!activationUncertain) planVerified('reviewer', m.reviewer);
+    if (!activationUncertain) {
+      planExact('recovery_acknowledged', JSON.parse(initialRecoveryAck));
+      planExact('complete', { recovery_ack_sha256: '0'.repeat(64) });
+    }
+    for (const boundary of putBoundaries) {
+      operation.journal.assertAppendPlanCapacity([
+        ...appendPlan.slice(0, boundary.index),
+        ...Array.from({ length: boundary.reservation }, () => ({ maximumBytes: MAX_RECOVERY_CHECKPOINT_BYTES })),
+      ]);
+    }
+    operation.journal.assertAppendPlanCapacity(appendPlan);
+    await appendOnce('prepared', { outbox_manifest_sha256: sha256(entry.manifestBytes), destination: operation.destination });
+    if (absent(read)) {
+      const postIntent = operation.journal.checkpoints().filter(checkpoint => checkpoint.phase === 'activation_post_intent');
+      if (postIntent.length > 0) {
+        await appendOnce('activation_post_intent', { envelope: m.envelope });
+        await appendOnce('activation_post_uncertain', { reason: 'intent_without_remote_readback' });
+        fail('activation_post_uncertain');
+      }
+      // This entry-level immutable intent prevents a second manifest or journal
+      // from granting another POST after any process loss around transport.
+      await ensureActivationIntent();
+      await appendOnce('activation_post_intent', { envelope: m.envelope });
+      await assertDestination();
+      const posted = await sink.postRun(entry.envelope, request(), entry.envelopeBytes);
+      await appendOnce('activation_post_outcome', outcome(posted));
+      read = await privateReadback();
+      if (absent(read)) {
+        await appendOnce('activation_post_uncertain', { reason: 'intent_without_remote_readback' });
+        fail('activation_post_uncertain');
+      }
+    }
+    if (read.kind !== 'ok' && read.kind !== 'pending') accepted(read);
+    if (read.kind === 'ok' && !read.value.bytes.equals(Buffer.from(entry.privateBytes))) fail('private_mismatch');
+
+    const envelopeReceipt = await sink.getRunReceipt(entry.envelope, entry.envelopeBytes, request());
+    assertEnvelopeReceipt(envelopeReceipt);
+    await appendOnce('envelope_verified', { sha256: m.envelope.sha256, artifacts_declared: entry.envelope.artifacts_declared });
+
+    for (const kind of ['report_json', 'report_md'] as const) {
+      const bytes = entry.artifacts[kind]; if (bytes === undefined) continue;
+      const state = await inspectOrdinary(kind, bytes);
+      if (state === 'exact') {
+        await appendOnce(`${kind}_verified`, m[kind]);
+        continue;
+      }
+      if (state === 'mismatch') fail('ordinary_mismatch');
+      assertPutMayProceed(`${kind}_put_outcome`);
+      assertPutCapacityBeforeIntent(kind);
+      await assertDestination();
+      await ensureActivationIntent();
+      await appendOnce(`${kind}_put_intent`, m[kind]);
+      operation.journal.assertAppendCapacity(PUT_COMPLETION_AFTER_INTENT_CHECKPOINTS, PUT_COMPLETION_AFTER_INTENT_BYTES);
+      const uploaded = await sink.putArtifact(m.runId, kind as ArtifactKind, bytes, request());
+      await appendPutOutcome(`${kind}_put_outcome`, outcome(uploaded));
+      if (await inspectOrdinary(kind, bytes) !== 'exact') {
+        if (uploaded.kind !== 'ok') accepted(uploaded);
+        fail('ordinary_mismatch');
+      }
+      await appendOnce(`${kind}_verified`, m[kind]);
+    }
+    read = await privateReadback();
+    if (read.kind !== 'ok' && read.kind !== 'pending') accepted(read);
+    if (read.kind === 'ok' && !read.value.bytes.equals(Buffer.from(entry.privateBytes))) fail('private_mismatch');
+    if (read.kind === 'pending') {
+      assertPutMayProceed('reviewer_put_outcome');
+      assertPutCapacityBeforeIntent('reviewer');
+      await assertDestination();
+      await ensureActivationIntent();
+      await appendOnce('reviewer_put_intent', m.reviewer);
+      operation.journal.assertAppendCapacity(PUT_COMPLETION_AFTER_INTENT_CHECKPOINTS, PUT_COMPLETION_AFTER_INTENT_BYTES);
+      const uploaded = await sink.putReviewerArtifact(m.runId, entry.privateBytes, m.reviewer, request());
+      await appendPutOutcome('reviewer_put_outcome', outcome(uploaded));
+      read = await privateReadback();
+      if (read.kind === 'pending') {
+        if (uploaded.kind !== 'ok') accepted(uploaded);
+        fail('unavailable');
+      }
+    }
+    if (read.kind !== 'ok' || !read.value.bytes.equals(Buffer.from(entry.privateBytes))) {
+      if (read.kind !== 'ok') accepted(read);
+      fail('private_mismatch');
+    }
+    await appendOnce('reviewer_verified', m.reviewer);
+
+    // Completion depends on fresh exact readback of every retained server byte,
+    // even when the private artifact was already present after a lost local ACK.
+    for (const kind of ['report_json', 'report_md'] as const) {
+      const bytes = entry.artifacts[kind];
+      if (bytes !== undefined && await inspectOrdinary(kind, bytes) !== 'exact') fail('ordinary_mismatch');
+    }
+    const finalPrivate = await privateReadback();
+    if (finalPrivate.kind !== 'ok' || !finalPrivate.value.bytes.equals(Buffer.from(entry.privateBytes))) {
+      if (finalPrivate.kind === 'pending') fail('unavailable');
+      if (finalPrivate.kind !== 'ok') accepted(finalPrivate);
+      fail('private_mismatch');
+    }
+    await assertDestination();
+    await ensureActivationIntent();
+    const recoveryAck = this.recoveryAcknowledgement(entry, operation, activationIntent);
+    this.assertRecoveryJournalAcknowledgements(operation, recoveryAck);
+    await this.assertRecoveryAcknowledgements(entry, recoveryAck);
+    await publish(join(entry.directory, 'recovery-acknowledged.json'), recoveryAck);
+    await appendOnce('recovery_acknowledged', JSON.parse(recoveryAck));
+    await publish(join(entry.directory, 'acknowledged.json'), this.ack(entry));
+    await appendOnce('complete', { recovery_ack_sha256: sha256(recoveryAck) });
   }
 }
 // Ephemeral creation authority is never persisted or reconstructed from a manifest.

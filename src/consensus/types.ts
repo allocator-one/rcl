@@ -186,7 +186,7 @@ export interface ReviewResult {
      * separately and never count. Absent from reports written before 4.2.0.
      */
     blockingHealth?: import('../report/blocking-health.js').BlockingHealthSummary;
-    /** Outcome of the single-model finding verification pass (RCL-23). */
+    /** Outcome of the blocking-finding verification pass (RCL-23, RCL-198). */
     verification?: import('./gating.js').VerificationStats;
     /** Trailing-precision weight applied to each of this run's models (RCL-27). */
     modelWeights?: Record<string, number>;

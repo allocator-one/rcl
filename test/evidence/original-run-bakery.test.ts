@@ -33,6 +33,13 @@ async function stale(path: string, state: 'choosing' | 'ready' = 'ready', extra 
   return owner;
 }
 
+it('keeps the test-only direct bakery registry after release', async () => {
+  const path = await root();
+  await expect(bakeryLock(path, identity, async () => 'done')).resolves.toBe('done');
+  expect(await readdir(registry(path))).toEqual([]);
+  expect(await readdir(path)).toEqual([`${sha256(identity)}.bakery`]);
+});
+
 it.each(['choosing', 'ready'] as const)('reclaims a dead %s unique registration', async state => {
   const path = await root(); await stale(path, state);
   await expect(bakeryLock(path, identity, async () => 'resumed')).resolves.toBe('resumed');

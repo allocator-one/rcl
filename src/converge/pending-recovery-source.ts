@@ -46,7 +46,8 @@ const ordinaryBodySchema = z.object({
   reason: z.literal('coordinator_exited_without_durable_blocking_receipts'),
   nativeStateSha256: digest,
   attemptStateSha256: digest,
-  retainedAsyncSha256: z.array(digest).min(1),
+  // Empty only for a council without async seats, which the package proved.
+  retainedAsyncSha256: z.array(digest),
   migrationPackageSha256: digest,
 }).strict();
 

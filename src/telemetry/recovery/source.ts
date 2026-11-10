@@ -26,7 +26,7 @@ const originalFinding = z.object({
     score: number, total: number, models: z.array(string), roles: z.array(string),
     crossRole: z.boolean(), crossModel: z.boolean(), elevated: z.boolean(),
   }).passthrough(),
-  gating: z.object({ reason: z.enum(['consensus', 'critical', 'verified', 'none']), verification: verification.optional() }).optional(),
+  gating: z.object({ reason: z.enum(['consensus', 'critical', 'verified', 'strict_fallback', 'none']), verification: verification.optional() }).optional(),
 });
 const finding = originalFinding.refine((value) => value.endLine >= value.startLine);
 export const originalRawFindingSchema = originalFinding.omit({ consensus: true, identity: true, gating: true });
@@ -55,6 +55,8 @@ const header = z.object({
     verification_timeout_ms: z.number().finite().nonnegative(),
     // Optional for reports written before RCL-85 introduced a whole-pass bound.
     verification_pass_timeout_ms: z.number().finite().nonnegative().optional(),
+    verification_pass_effective_timeout_ms: z.number().finite().nonnegative().optional(),
+    strict_fallback: z.object({ version: z.literal(1), cause: z.enum(['verification_pass_timeout', 'verification_pass_failed']) }).strict().optional(),
   }),
   spec: z.object({ source: nonblank, sha256: hash }).optional(),
   context_files: z.array(z.object({ path: nonblank, sha256: hash })).max(200),
@@ -74,6 +76,16 @@ const modern = z.object({
 export const originalRunReportSchema = modern.safeExtend({
   findings: z.array(originalFinding).max(2000),
   belowThresholdFindings: z.array(originalFinding).max(2000).optional(),
+});
+/**
+ * A report whose evidence was refused locally because a finding's file or
+ * title was blank (RCL-189). Only a terminal-rejection proof reads it, to
+ * dispose of that run; it never becomes a delivery source.
+ */
+const locallyRefusedFinding = originalFinding.extend({ file: string, title: string });
+export const locallyRefusedReportSchema = originalRunReportSchema.safeExtend({
+  findings: z.array(locallyRefusedFinding).max(2000),
+  belowThresholdFindings: z.array(locallyRefusedFinding).max(2000).optional(),
 });
 const legacy = z.object({
   reviews: z.array(z.object({ model: nonblank }).passthrough()).max(500),

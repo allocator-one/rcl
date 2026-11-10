@@ -151,6 +151,5 @@ it('rejects invalid immutable reports under target ownership and releases coordi
     findings: [], evidence: { reportJson: 'invalid JSON' } })).rejects.toThrow('Invalid immutable report JSON.');
   expect(await readdir(root)).toEqual(['rcl-native-target-locks']);
   const coordination = await readdir(join(root, 'rcl-native-target-locks'));
-  expect(coordination).toEqual([expect.stringMatching(/^[a-f0-9]{64}\.bakery$/)]);
-  expect(await readdir(join(root, 'rcl-native-target-locks', coordination[0]!))).toEqual([]);
+  expect(coordination).toEqual([]);
 });

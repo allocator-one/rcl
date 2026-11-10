@@ -76,7 +76,12 @@ describe('review CLI timer validation before guarded launch', () => {
       expect(await loadConvergeRunState(common, 'timer-preclaim')).toBeUndefined();
       // No async spool or native claim directory was created either: detached
       // work cannot hide behind a callback that has not reached the server yet.
-      expect(readdirSync(common).sort()).toEqual(nativeFilesBefore);
+      // The startup ownership window (RCL-236) may have created its lock
+      // directory, but it must hold no lock once the refusal has exited.
+      const locks = join(common, 'rcl-native-target-locks');
+      if (existsSync(locks)) expect(readdirSync(locks)).toEqual([]);
+      expect(readdirSync(common).filter(name => name !== 'rcl-native-target-locks').sort())
+        .toEqual(nativeFilesBefore.filter(name => name !== 'rcl-native-target-locks'));
       expect(existsSync(join(cwd, 'report.json'))).toBe(false);
     } finally {
       server.closeAllConnections();

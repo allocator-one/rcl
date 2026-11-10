@@ -139,10 +139,22 @@ describe('captured aggregation inputs', () => {
 
 
 describe('captured verifier protocol discriminator', () => {
-  it('writes explicit v2 for fresh capture without permitting a legacy request', () => {
+  it('writes explicit v3 for fresh capture without permitting a legacy request', () => {
     const captured = captureAggregationInputs(input());
-    expect(JSON.parse(captured.bytes).verifierContractVersion).toBe(2);
+    expect(JSON.parse(captured.bytes).verifierContractVersion).toBe(3);
     expect(() => captureAggregationInputs({ ...input(), verifierContractVersion: 1 } as any)).toThrow('aggregation_invalid_input');
+  });
+  it('captures the verifier task context with version three only', () => {
+    const taskContext = { spec: 'Admins may delete records.', prTitle: 'Allow deletes' };
+    const captured = captureAggregationInputs({ ...input(), taskContext });
+    expect(decodeAggregationInputs(captured.bytes, diffSha256).taskContext).toEqual(taskContext);
+    const wire = JSON.parse(captured.bytes);
+    expect(() => decodeAggregationInputs(stableStringify({ ...wire, verifierContractVersion: 2 }), diffSha256))
+      .toThrow('aggregation_invalid_document');
+  });
+  it('still decodes a version two capture', () => {
+    const wire = { ...JSON.parse(captureAggregationInputs(input()).bytes), verifierContractVersion: 2 };
+    expect(decodeAggregationInputs(stableStringify(wire), diffSha256).verifierContractVersion).toBe(2);
   });
   it('preserves canonical legacy bytes and refuses legacy effort or unsupported markers', () => {
     const wire = JSON.parse(captureAggregationInputs(input()).bytes);
@@ -150,7 +162,7 @@ describe('captured verifier protocol discriminator', () => {
     const oldBytes = stableStringify(wire);
     expect(decodeAggregationInputs(oldBytes, diffSha256).bytes).toBe(oldBytes);
     expect(() => decodeAggregationInputs(stableStringify({ ...wire, gating: { ...wire.gating, verificationReasoningEffort: 'high' } }), diffSha256)).toThrow('aggregation_invalid_document');
-    for (const marker of [1, 3, '2', null]) {
+    for (const marker of [1, 4, '2', null]) {
       expect(() => decodeAggregationInputs(stableStringify({ ...wire, verifierContractVersion: marker }), diffSha256)).toThrow('aggregation_invalid_document');
     }
   });

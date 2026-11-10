@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { constants } from 'node:fs';
-import { mkdir, mkdtemp, open, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { withNativeLock } from '../../src/converge/native-lock.js';
@@ -10,7 +10,14 @@ import { prepareLockRoot } from '../../src/evidence/original-run/lock-path.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 import { RegistryCleanupError, withLegacyReservation } from '../../src/coordination/registry-lock.js';
 
-const faults = vi.hoisted(() => ({ overlay: false }));
+const faults = vi.hoisted(() => ({
+  overlay: false,
+  registryRmdirCode: undefined as 'ENOENT' | undefined,
+  rootSyncCode: undefined as 'ENOENT' | 'EIO' | undefined,
+  rootSyncPath: undefined as string | undefined,
+  rootSyncArmed: false,
+  outerReservationObserved: false,
+}));
 vi.mock('../../src/evidence/original-run/lock-scope.js', async original => {
   const module = await original<typeof import('../../src/evidence/original-run/lock-scope.js')>();
   return { ...module, localLockScope: vi.fn(module.localLockScope) };
@@ -21,10 +28,36 @@ vi.mock('../../src/evidence/original-run/lock-path.js', async original => {
 });
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
-  return { ...fs, statfs: async (...args: Parameters<typeof fs.statfs>) => {
-    const result = await fs.statfs(...args);
-    return faults.overlay ? { ...result, type: 0x794c7630n } : result;
-  } };
+  return {
+    ...fs,
+    statfs: async (...args: Parameters<typeof fs.statfs>) => {
+      const result = await fs.statfs(...args);
+      return faults.overlay ? { ...result, type: 0x794c7630n } : result;
+    },
+    rmdir: async (...args: Parameters<typeof fs.rmdir>) => {
+      const path = String(args[0]);
+      if (!path.endsWith('.bakery')) return fs.rmdir(...args);
+      const lock = `${path.slice(0, -'.bakery'.length)}.lock`;
+      faults.outerReservationObserved = await fs.readFile(lock).then(() => true, () => false);
+      if (faults.registryRmdirCode === 'ENOENT') {
+        faults.registryRmdirCode = undefined;
+        await fs.rmdir(...args);
+        throw Object.assign(new Error('already removed'), { code: 'ENOENT' });
+      }
+      const result = await fs.rmdir(...args);
+      if (faults.rootSyncCode !== undefined) faults.rootSyncArmed = true;
+      return result;
+    },
+    open: async (...args: Parameters<typeof fs.open>) => {
+      if (faults.rootSyncArmed && String(args[0]) === faults.rootSyncPath) {
+        faults.rootSyncArmed = false;
+        const code = faults.rootSyncCode!;
+        faults.rootSyncCode = undefined;
+        throw Object.assign(new Error(`root sync ${code}`), { code });
+      }
+      return fs.open(...args);
+    },
+  };
 });
 
 let root: string;
@@ -32,7 +65,16 @@ const target = 'synthetic-protocol', token = '00000000-0000-4000-8000-0000000000
 const unknownScope = { platform: 'ordinary-unqualified' as const, operating_system: 'win32' };
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 beforeEach(async () => { root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-native-lock-'))); });
-afterEach(async () => { faults.overlay = false; Object.defineProperty(process, 'platform', platform); await rm(root, { recursive: true, force: true }); });
+afterEach(async () => {
+  faults.overlay = false;
+  faults.registryRmdirCode = undefined;
+  faults.rootSyncCode = undefined;
+  faults.rootSyncPath = undefined;
+  faults.rootSyncArmed = false;
+  faults.outerReservationObserved = false;
+  Object.defineProperty(process, 'platform', platform);
+  await rm(root, { recursive: true, force: true });
+});
 
 /** Exact pre-bakery owner document and O_EXCL acquisition shape. */
 async function historicalLock(identity: string, acquired: () => void, release: Promise<void>) {
@@ -108,6 +150,82 @@ it.each(['ordinary first', 'recovery first'] as const)('uses the same registry t
     release(); await owner; await waiter;
   }
   expect(secondEntered).toBe(true);
+  expect(await readdir(root)).toEqual([]);
+});
+
+it('removes and recreates an empty registry between a holder and queued contender', async () => {
+  let entered!: () => void, releaseHolder!: () => void, queued!: () => void, retry!: () => void;
+  const holderEntered = new Promise<void>(resolve => { entered = resolve; });
+  const holderHeld = new Promise<void>(resolve => { releaseHolder = resolve; });
+  const contenderQueued = new Promise<void>(resolve => { queued = resolve; });
+  const retryAllowed = new Promise<void>(resolve => { retry = resolve; });
+  let contenderEntered = false;
+  const holder = withNativeLock(root, target, async () => { entered(); await holderHeld; });
+  let contender: Promise<void> | undefined;
+  try {
+    await holderEntered;
+    contender = withNativeLock(root, target, async () => { contenderEntered = true; }, {
+      wait: async () => { queued(); await retryAllowed; },
+    });
+    void contender.catch(() => {});
+    await contenderQueued;
+    expect(contenderEntered).toBe(false);
+    releaseHolder();
+    await holder;
+    expect(await readdir(root)).toEqual([]);
+    retry();
+    await contender;
+    expect(contenderEntered).toBe(true);
+    expect(await readdir(root)).toEqual([]);
+  } finally {
+    releaseHolder(); retry();
+    await Promise.allSettled([holder, ...(contender ? [contender] : [])]);
+  }
+});
+
+it('removes empty registries for unique identities after releasing their outer reservations', async () => {
+  for (let index = 0; index < 10; index++) {
+    await expect(withNativeLock(root, `target-${index}`, async () => index)).resolves.toBe(index);
+  }
+  expect(await readdir(root)).toEqual([]);
+});
+
+it('accepts an already absent empty registry while the outer reservation is held', async () => {
+  faults.registryRmdirCode = 'ENOENT';
+  await expect(withNativeLock(root, target, async () => 'committed')).resolves.toBe('committed');
+  expect(faults.outerReservationObserved).toBe(true);
+  expect(await readdir(root)).toEqual([]);
+});
+
+it('removes an empty registry when acquisition fails before registration publication', async () => {
+  await expect(withNativeLock(root, target, async () => undefined, {
+    onEvent: async event => { if (event.stage === 'legacy_reserved') throw new Error('pre-publication failure'); },
+  })).rejects.toThrow('pre-publication failure');
+  expect(faults.outerReservationObserved).toBe(true);
+  expect(await readdir(root)).toEqual([]);
+});
+
+it('conservatively retains a registry that gains an unknown entry during work', async () => {
+  const registry = join(root, `${sha256(target)}.bakery`);
+  await withNativeLock(root, target, async () => {
+    await writeFile(join(registry, 'inspection-required'), 'retain', { mode: 0o600 });
+  });
+  expect(faults.outerReservationObserved).toBe(true);
+  expect(await readdir(registry)).toEqual(['inspection-required']);
+  expect(await readdir(root)).toEqual([`${sha256(target)}.bakery`]);
+});
+
+it.each(['ENOENT', 'EIO'] as const)('preserves completed work when post-removal root sync fails with %s', async syncCode => {
+  faults.rootSyncPath = root;
+  faults.rootSyncCode = syncCode;
+  let error: unknown;
+  try { await withNativeLock(root, target, async () => 'committed'); }
+  catch (caught) { error = caught; }
+  expect(error).toBeInstanceOf(RegistryCleanupError);
+  expect((error as RegistryCleanupError<string>).result).toBe('committed');
+  expect((error as Error).cause).toMatchObject({ code: syncCode });
+  expect(faults.outerReservationObserved).toBe(true);
+  expect(await readdir(root)).toEqual([]);
 });
 
 it.each(['historical first', 'bakery first'] as const)('excludes a historical owner with %s acquisition', async order => {

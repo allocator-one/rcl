@@ -13,8 +13,8 @@ import { CheckpointJournal, exportCheckpointProof, freezeCheckpointPlan } from '
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/dispatch/recovery-operation.js';
-import { loadReviewerLineage } from '../../src/evidence/reviewer-lineage.js';
-import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
+import { isVerifierContractUpgrade, loadReviewerLineage } from '../../src/evidence/reviewer-lineage.js';
+import { captureAggregationInputs, decodeAggregationInputs } from '../../src/report/aggregation-inputs.js';
 import { assembleCheckpointReview } from '../../src/report/checkpoint-assembly.js';
 import { projectCheckpointReport } from '../../src/report/checkpoint-projection.js';
 import { inspectReviewerArtifact, serializeReviewerArtifact, type InspectedReviewerArtifact } from '../../src/report/reviewer-artifact.js';
@@ -342,5 +342,29 @@ describe('cold retained lineage reopening', () => {
     const value = await retainedThreeGeneration({ omitRoot: true });
     await expect(loadReviewerLineage(value)).rejects.toThrow();
     expect(await loadConvergeRunState(value.commonDir, value.target)).toBeUndefined();
+  });
+});
+
+describe('verifier contract upgrade on recovery (RCL-198)', () => {
+  const diffSha256 = 'a'.repeat(64);
+  const role = { name: 'general', systemPrompt: 's', focus: [], description: 'd', isSpecialized: false };
+  const current = (taskContext?: { spec: string }) => captureAggregationInputs({ algorithm: { name: 'consensus', version: 2 },
+    diffSha256, roleMap: new Map([['general', role]]), thresholds: { minConsensusScore: 0, minConfidence: 0, dedupeLineWindow: 5, jaccardThreshold: 0.3 },
+    gating: { mode: 'verified-consensus', minModels: 2, verificationModel: 'openai/verifier', verificationTimeoutMs: 100, verificationPassTimeoutMs: 100 },
+    belowThresholdAppendix: true, ...(taskContext ? { taskContext } : {}) });
+  const older = (version: 2 | undefined) => {
+    const { taskContext: _task, ...wire } = JSON.parse(current().bytes);
+    return decodeAggregationInputs(stableStringify({ ...wire, verifierContractVersion: version }), diffSha256);
+  };
+
+  it.each([['version two', 2], ['legacy', undefined]] as const)('lets a %s capture recover under the current contract', (_label, version) => {
+    expect(isVerifierContractUpgrade(older(version), current({ spec: 'new spec' }))).toBe(true);
+  });
+
+  it('refuses a downgrade, an equal contract or any other aggregation change', () => {
+    expect(isVerifierContractUpgrade(current(), older(2))).toBe(false);
+    expect(isVerifierContractUpgrade(current(), current({ spec: 'other' }))).toBe(false);
+    const changed = JSON.parse(current().bytes); changed.gating.minModels = 3;
+    expect(isVerifierContractUpgrade(older(2), decodeAggregationInputs(stableStringify(changed), diffSha256))).toBe(false);
   });
 });

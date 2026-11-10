@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
@@ -36,6 +37,23 @@ vi.mock('../../src/evidence/original-run/lock-scope.js', async importOriginal =>
   };
 });
 
+// Replays the 4.5.23 report validator, which refused any verification on a critical or consensus finding (RCL-228).
+const legacyValidator = vi.hoisted(() => ({ on: false, acceptAll: false }));
+vi.mock('../../src/telemetry/report-consistency.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../../src/telemetry/report-consistency.js')>();
+  return {
+    ...original,
+    verifiedConsensusReportProblem: (...args: Parameters<typeof original.verifiedConsensusReportProblem>) => {
+      const report = args[0] as { findings: Array<{ gating?: { reason: string; verification?: unknown } }> };
+      const index = report.findings.findIndex(f => ['consensus', 'critical'].includes(f.gating?.reason ?? '') && f.gating?.verification !== undefined);
+      if (legacyValidator.acceptAll) return undefined;
+      return legacyValidator.on && index >= 0
+        ? `findings.${index}.gating.verification.verdict contradicts the ${report.findings[index]!.gating!.reason} gating reason in report_json`
+        : original.verifiedConsensusReportProblem(...args);
+    },
+  };
+});
+
 vi.mock('../../src/converge/process-identity.js', async importOriginal => {
   const identity = await importOriginal<typeof import('../../src/converge/process-identity.js')>();
   return {
@@ -53,13 +71,15 @@ vi.mock('../../src/converge/process-identity.js', async importOriginal => {
   };
 });
 
+/** The release running the recovery: reports stamped with it were judged by the validators in this checkout. */
+const RUNNING: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
 const roots: string[] = [];
-afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
-async function fixture(legacy = true, cap = 20) {
+afterEach(async () => { vi.restoreAllMocks(); legacyValidator.acceptAll = false; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' | 'verdict' | 'critical-confirmed' | 'refuted' | 'stats' | 'level' = 'label') {
   const common = await mkdtemp(join(tmpdir(), 'rcl-terminal-')); roots.push(common);
   const dataDir = join(common, 'data'); await mkdir(dataDir, { mode: 0o700 });
   const target = 'synthetic-9220', headSha = 'a'.repeat(40), inputSha256 = 'b'.repeat(64), reportPath = join(common, 'original-report.json');
-  const rt: TelemetryRuntime = { level: 'full', repoManaged: true, parseFailures: false,
+  const rt: TelemetryRuntime = { level: defect === 'level' ? 'findings' : 'full', repoManaged: true, parseFailures: false,
     dataDir, rclVersion: '4.4.18', outbox: new Outbox(join(dataDir, 'outbox')), quarantine: new Quarantine(join(dataDir, 'quarantine')), stderr: () => {} };
   let active: ReviewCycleReceipt | null = null;
   const cycleRemote = { repo: 'allocator-one/rcl', prNumber: 42, url: 'https://harness.example', current: vi.fn(async () => active),
@@ -69,7 +89,33 @@ async function fixture(legacy = true, cap = 20) {
   result.run!.roster = Array.from({ length: 10 }, (_, i) => ({ model: `openai/seat${i}`, role: 'bug-hunter', provider: 'openai', lane: 'blocking' as const }));
   result.reviews = result.run!.roster.map((seat, i) => sampleReview({ ...seat, status: i < 7 ? 'success' : 'error', error: i < 7 ? undefined : 'synthetic failure' }));
   result.stats.totalReviews = 10; result.stats.successfulReviews = 7;
-  delete result.findings[0]!.gating;
+  if (defect === 'label') delete result.findings[0]!.gating;
+  else if (defect === 'blank-file') result.belowThresholdFindings![0]!.file = '';
+  else if (defect === 'verdict' || defect === 'refuted') {
+    // RCL-228: 4.5.23 refused a consensus finding with a verification. `verdict` is the shape of run 01a1b0fd, valid
+    // under the current validator. `refuted` keeps a tier the gate removes, so the current validator still refuses it
+    // (RCL-230: the running release refused it itself, so the refusal replays).
+    result.run!.rcl_version = defect === 'verdict' ? '4.5.23' : RUNNING;
+    const verdict = defect === 'verdict' ? 'insufficient_evidence' : 'refuted';
+    result.findings[0]!.gating = { reason: 'consensus', verification: { model: 'openai/gpt-6-astra', verdict, note: 'The source does not show the caller.' } };
+    result.stats.verification = { model: 'openai/gpt-6-astra', candidates: 1, refuted: verdict === 'refuted' ? 1 : 0, unrefuted: 0, unavailable: 0, durationMs: 100 };
+  }
+  else if (defect === 'critical-confirmed') {
+    // RCL-227: 4.5.22 refused a critical finding its verifier confirmed (run 01a1b0e5), which the current validator accepts.
+    result.run!.rcl_version = '4.5.22';
+    result.findings[0]!.gating = { reason: 'critical', verification: { model: 'openai/gpt-6-astra', verdict: 'confirmed', note: 'The caller is shown.' } };
+    result.stats.verification = { model: 'openai/gpt-6-astra', candidates: 1, refuted: 0, unrefuted: 0, confirmed: 1, unavailable: 0, durationMs: 100 };
+  }
+  else if (defect === 'stats') {
+    // RCL-230: a diagnostic outside the label, blank-text and verdict classes the first recoveries named.
+    result.findings[0]!.gating = { reason: 'verified', verification: { model: 'openai/gpt-6-astra', verdict: 'confirmed', note: 'The caller is shown.' } };
+    delete result.stats.verification;
+  }
+  else {
+    // A valid strict fallback (RCL-160), refused only because level `findings` never sends its report.
+    result.run!.gating.strict_fallback = { version: 1, cause: 'verification_pass_timeout' };
+    result.findings[0]!.gating = { reason: 'strict_fallback', verification: { verdict: 'unavailable' } };
+  }
   const health = { version: 1 as const, policy: resolveQuorumPolicy(10), successfulSeats: 7 };
   const options = { gitCommonDir: common, target, headSha, inputSha256, cycleRemote, maxAttempts: cap, validate: vi.fn(async () => {}) };
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -80,7 +126,8 @@ async function fixture(legacy = true, cap = 20) {
     result.run!.cycle_id = context.cycleId;
     result.run!.converge = { target, attempt: context.attempt, round: context.round };
     const bytes = JSON.stringify(result); await writeFile(reportPath, bytes, { mode: 0o600 });
-    const outcome = await deliverRun(rt, { result, artifacts: { report_json: bytes }, evidenceRequired: true });
+    legacyValidator.on = defect === 'verdict' || defect === 'critical-confirmed';
+    const outcome = await deliverRun(rt, { result, artifacts: { report_json: bytes }, evidenceRequired: true }).finally(() => { legacyValidator.on = false; });
     expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4, failureDisposition: 'local-invalid' });
     return { runId: result.run!.id, reportJsonSha256: sha256(bytes), successfulReviews: 7, totalReviews: 10,
       reviewerHealth: health, ...(legacy ? { deliveryPending: outcome.spooled || outcome.exitCode !== 0 } : guardedDeliveryState(outcome)),
@@ -95,7 +142,7 @@ async function fixture(legacy = true, cap = 20) {
   if (attempts.attempts[2].processIdentity) attempts.attempts[2].processIdentity.pid = 99999999;
   await writeFile(nativePath, JSON.stringify(state)); await writeFile(attemptsPath, JSON.stringify(attempts));
   const selection = { target, runId: result.run!.id, reportPath, reportSha256: sha256(await readFile(reportPath)), reason: 'Original strict-fallback labels rejected locally; fix verified before bounded retry.' };
-  const preview = () => previewTerminalRejection(selection, common, dataDir);
+  const preview = () => previewTerminalRejection(selection, common, dataDir, RUNNING);
   const prepare = async () => {
     const manifest = await preview(), path = join(common, 'recovery.json'), bytes = serializeRecoveryDocument(manifest);
     await writeFile(path, bytes, { mode: 0o600 });
@@ -111,13 +158,29 @@ async function snapshot(f: Awaited<ReturnType<typeof fixture>>) {
     quarantine: await Promise.all((await readdir(q)).sort().map(async name => [name, await readFile(join(q, name))])) };
 }
 
+/** Re-stamp the stored report's release and rebind the launch to it; the caller then retains a matching quarantine. */
+async function stamp(f: Awaited<ReturnType<typeof fixture>>, version: string) {
+  f.result.run!.rcl_version = version;
+  const bytes = JSON.stringify(f.result);
+  await writeFile(f.selection.reportPath, bytes);
+  f.selection.reportSha256 = sha256(bytes); f.state.lastLaunch.reportJsonSha256 = sha256(bytes);
+  await writeFile(f.nativePath, JSON.stringify(f.state));
+  return { bytes, artifacts: { report_json: bytes } };
+}
+async function retainRefusal(f: Awaited<ReturnType<typeof fixture>>, artifacts: { report_json: string }, diagnostics: Array<{ path: string; message: string }>) {
+  await rm(join(f.dataDir, 'quarantine'), { recursive: true });
+  expect(await f.rt.quarantine!.retain({ runId: f.selection.runId, artifacts,
+    envelope: buildRunEnvelope(f.result, artifacts, { level: 'full', delivery: { mode: 'direct' }, parseFailures: false }),
+    events: [], requestedMode: 'asserted', acknowledged: false, diagnostics })).toMatchObject({ status: 'complete' });
+}
+
 it.each([true, false])('preserves healthy 7/10 attempt3 and only the later guarded retry claims attempt4/round1 (legacy=%s)', async legacy => {
   const f = await fixture(legacy), before = await snapshot(f);
   await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
     .rejects.toThrow(legacy ? 'delivery_pending' : 'terminal_rejection_proof_required');
   const { input, manifest } = await f.prepare();
   expect(await snapshot(f)).toEqual(before);
-  expect(await applyTerminalRejection(input, f.common, f.dataDir)).toBe('applied');
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('applied');
   const applied = await snapshot(f);
   expect(applied.attempts).toEqual(before.attempts); expect(applied.report).toEqual(before.report); expect(applied.quarantine).toEqual(before.quarantine);
   const state = (await loadConvergeRunState(f.common, f.selection.target))!;
@@ -127,7 +190,7 @@ it.each([true, false])('preserves healthy 7/10 attempt3 and only the later guard
   const dir = join(f.common, 'rcl-terminal-rejections', manifest.operationId);
   expect(await readFile(join(dir, 'native-before.json'))).toEqual(before.native);
   expect(await readFile(join(dir, 'attempts-before.json'))).toEqual(before.attempts);
-  expect(await applyTerminalRejection(input, f.common, f.dataDir)).toBe('unchanged');
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('unchanged');
   expect(await snapshot(f)).toEqual(applied);
   await expect(guardReviewLaunch({ ...f.options, run: f.nextRun })).rejects.toThrow('terminal_rejection_retry_reason');
   const brokenPreflight = vi.fn(async () => { throw new Error('synthetic output preflight failed'); });
@@ -141,7 +204,7 @@ it.each([true, false])('preserves healthy 7/10 attempt3 and only the later guard
   expect(f.nextRun).toHaveBeenCalledTimes(1);
   expect(f.nextRun).toHaveBeenCalledWith({ target: f.selection.target, round: 1, attempt: 4, cycleId: f.state.cycle.id }, expect.anything());
   expect((await loadConvergeRunState(f.common, f.selection.target))!.rounds).toEqual([]);
-  await expect(applyTerminalRejection(input, f.common, f.dataDir)).rejects.toThrow('state_changed');
+  await expect(applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).rejects.toThrow('state_changed');
 });
 
 it.each(['quarantine-missing', 'quarantine-tampered', 'outbox', 'reviewer-outbox', 'live-owner', 'uncertain-owner', 'admitted', 'changed-attempt', 'wrong-report', 'acknowledged', 'valid-report'] as const)
@@ -174,14 +237,14 @@ it.each(['quarantine-missing', 'quarantine-tampered', 'outbox', 'reviewer-outbox
     }
     const native = await readFile(f.nativePath), attempts = await readFile(f.attemptsPath);
     await expect(f.preview()).rejects.toThrow();
-    if (kind !== 'wrong-report') await expect(applyTerminalRejection(input, f.common, f.dataDir)).rejects.toThrow();
+    if (kind !== 'wrong-report') await expect(applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).rejects.toThrow();
     expect(await readFile(f.nativePath)).toEqual(native); expect(await readFile(f.attemptsPath)).toEqual(attempts);
     expect(f.nextRun).not.toHaveBeenCalled();
   });
 
 it('refuses missing retained proof after apply and does not spend the next claim', async () => {
   const f = await fixture(), { input, manifest } = await f.prepare();
-  await applyTerminalRejection(input, f.common, f.dataDir);
+  await applyTerminalRejection(input, f.common, f.dataDir, RUNNING);
   await rm(join(f.common, 'rcl-terminal-rejections', manifest.operationId, 'native-before.json'));
   const before = await readFile(f.attemptsPath);
   await expect(guardReviewLaunch({ ...f.options, retryReason: 'Cannot bypass missing proof', run: f.nextRun })).rejects.toThrow();
@@ -190,7 +253,7 @@ it('refuses missing retained proof after apply and does not spend the next claim
 
 it('does not refund or override an exhausted attempt budget', async () => {
   const f = await fixture(true, 3), { input } = await f.prepare();
-  await applyTerminalRejection(input, f.common, f.dataDir);
+  await applyTerminalRejection(input, f.common, f.dataDir, RUNNING);
   const before = await readFile(f.attemptsPath);
   await expect(guardReviewLaunch({ ...f.options, retryReason: 'No extra budget granted', run: f.nextRun })).rejects.toThrow('budget exhausted');
   expect(await readFile(f.attemptsPath)).toEqual(before); expect(f.nextRun).not.toHaveBeenCalled();
@@ -198,7 +261,7 @@ it('does not refund or override an exhausted attempt budget', async () => {
 
 it('serializes competing apply calls to one audit and no new claim', async () => {
   const f = await fixture(), { input } = await f.prepare(), before = await readFile(f.attemptsPath);
-  const results = await Promise.allSettled([applyTerminalRejection(input, f.common, f.dataDir), applyTerminalRejection(input, f.common, f.dataDir)]);
+  const results = await Promise.allSettled([applyTerminalRejection(input, f.common, f.dataDir, RUNNING), applyTerminalRejection(input, f.common, f.dataDir, RUNNING)]);
   expect(results.some(r => r.status === 'fulfilled' && r.value === 'applied')).toBe(true);
   expect((await loadConvergeRunState(f.common, f.selection.target))!.terminalRejections).toHaveLength(1);
   expect(await readFile(f.attemptsPath)).toEqual(before);
@@ -211,15 +274,15 @@ it('refuses a second preview for the same rejected run after another preview was
   const secondBytes = serializeRecoveryDocument(secondManifest);
   await writeFile(secondPath, secondBytes, { mode: 0o600 });
 
-  await expect(applyTerminalRejection(first.input, f.common, f.dataDir)).resolves.toBe('applied');
-  await expect(applyTerminalRejection({ manifest: secondPath, manifestSha256: sha256(secondBytes) }, f.common, f.dataDir))
+  await expect(applyTerminalRejection(first.input, f.common, f.dataDir, RUNNING)).resolves.toBe('applied');
+  await expect(applyTerminalRejection({ manifest: secondPath, manifestSha256: sha256(secondBytes) }, f.common, f.dataDir, RUNNING))
     .rejects.toThrow('terminal_rejection_already_disposed');
   expect((await loadConvergeRunState(f.common, f.selection.target))!.terminalRejections).toHaveLength(1);
 });
 
 it('uses retained originals after source cleanup and admits the later normal report', async () => {
   const f = await fixture(), { input } = await f.prepare();
-  await applyTerminalRejection(input, f.common, f.dataDir);
+  await applyTerminalRejection(input, f.common, f.dataDir, RUNNING);
   await rm(f.selection.reportPath); await rm(join(f.dataDir, 'quarantine'), { recursive: true });
   await guardReviewLaunch({ ...f.options, retryReason: 'bounded retry after supported recovery', run: f.nextRun });
   const launch = (await loadConvergeRunState(f.common, f.selection.target))!.lastLaunch!;
@@ -230,7 +293,7 @@ it('uses retained originals after source cleanup and admits the later normal rep
 
 it('verifies retained history before retrying a subsequently failed launch', async () => {
   const f = await fixture(), { input, manifest } = await f.prepare();
-  await applyTerminalRejection(input, f.common, f.dataDir);
+  await applyTerminalRejection(input, f.common, f.dataDir, RUNNING);
   await expect(guardReviewLaunch({ ...f.options, retryReason: 'bounded retry', run: async () => { throw new Error('synthetic attempt4 failed'); } })).rejects.toThrow('synthetic attempt4 failed');
   await rm(join(f.common, 'rcl-terminal-rejections', manifest.operationId, 'report.json'));
   const before = await readFile(f.attemptsPath);
@@ -239,27 +302,138 @@ it('verifies retained history before retrying a subsequently failed launch', asy
 });
 
 
-it.each(['forged-label-diagnostic', 'transport-refusal'])('refuses self-consistent valid evidence with %s', async kind => {
+it.each([
+  ['forged-label-diagnostic', 'terminal_rejection_rejection_diagnostics'],
+  ['transport-refusal', 'terminal_rejection_unsupported_local_rejection'],
+] as const)('refuses self-consistent valid evidence with %s', async (kind, refusal) => {
   const f = await fixture();
   f.result.findings[0]!.gating = { reason: 'consensus' };
-  const bytes = JSON.stringify(f.result), artifacts = { report_json: bytes };
-  await writeFile(f.selection.reportPath, bytes);
-  f.selection.reportSha256 = sha256(bytes); f.state.lastLaunch.reportJsonSha256 = sha256(bytes);
-  await writeFile(f.nativePath, JSON.stringify(f.state));
-  await rm(join(f.dataDir, 'quarantine'), { recursive: true });
-  expect(await f.rt.quarantine!.retain({ runId: f.selection.runId, artifacts,
-    envelope: buildRunEnvelope(f.result, artifacts, { level: 'full', delivery: { mode: 'direct' }, parseFailures: false }),
-    events: [], requestedMode: 'asserted', acknowledged: false,
-    diagnostics: kind === 'transport-refusal' ? [{ path: 'delivery', message: 'HTTP 422 rejected' }]
-      : [{ path: 'findings.0.gating.reason', message: 'Verified-consensus finding is missing a valid gating label' }] })).toMatchObject({ status: 'complete' });
+  const { artifacts } = await stamp(f, RUNNING);
+  await retainRefusal(f, artifacts, kind === 'transport-refusal' ? [{ path: 'delivery', message: 'HTTP 422 rejected' }]
+    : [{ path: 'findings.0.gating.reason', message: 'Verified-consensus finding is missing a valid gating label' }]);
   const before = await snapshot(f);
-  await expect(f.preview()).rejects.toThrow('unsupported_local_rejection');
+  await expect(f.preview()).rejects.toThrow(refusal);
+  expect(await snapshot(f)).toEqual(before);
+});
+
+it('disposes a run 4.5.23 refused for a verification the current validator accepts and admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'verdict'), before = await snapshot(f);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('applied');
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Validator fix verified; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('disposes a run 4.5.22 refused for a confirmed critical finding and admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'critical-confirmed'), before = await snapshot(f);
+  expect((await f.rt.quarantine!.inspect(f.selection.runId))!.manifest!.diagnostics).toEqual([{ path: 'report_json',
+    message: 'findings.0.gating.verification.verdict contradicts the critical gating reason in report_json' }]);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('applied');
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Validator fix verified; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('recovers a report the running release refused for a real inconsistency, then admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'refuted'), before = await snapshot(f);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('applied');
+  const applied = await snapshot(f);
+  expect(applied.attempts).toEqual(before.attempts); expect(applied.report).toEqual(before.report); expect(applied.quarantine).toEqual(before.quarantine);
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Producer fix verified; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('recovers a refusal outside the label, blank-text and verdict classes without a start-over', async () => {
+  const f = await fixture(false, 20, 'stats'), before = await snapshot(f);
+  expect((await f.rt.quarantine!.inspect(f.selection.runId))!.manifest!.diagnostics).toEqual([
+    { path: 'stats.verification', message: 'Verified-consensus report is missing verification stats for annotated candidates' }]);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('applied');
+  const applied = await snapshot(f);
+  expect(applied.attempts).toEqual(before.attempts); expect(applied.report).toEqual(before.report); expect(applied.quarantine).toEqual(before.quarantine);
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Producer fix verified; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('recovers a refusal an older release recorded that the current validators accept', async () => {
+  const f = await fixture(false, 20, 'label');
+  f.result.findings[0]!.gating = { reason: 'consensus' };
+  const { artifacts } = await stamp(f, '4.4.18');
+  await retainRefusal(f, artifacts, [{ path: 'report_json', message: 'a refusal worded by an older release' }]);
+  const { input } = await f.prepare();
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('applied');
+  await guardReviewLaunch({ ...f.options, retryReason: 'Validator fix verified; bounded new review', run: f.nextRun });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('keeps an applied recovery valid after a later release judges the report differently', async () => {
+  const f = await fixture(false, 20, 'refuted'), { input } = await f.prepare();
+  await applyTerminalRejection(input, f.common, f.dataDir, RUNNING);
+  legacyValidator.acceptAll = true;
+  await guardReviewLaunch({ ...f.options, retryReason: 'Bounded retry under a later validator', run: f.nextRun });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('refuses an older-release refusal recorded for a report stamped by the running release', async () => {
+  const f = await fixture(false, 20, 'verdict');
+  const { artifacts } = await stamp(f, RUNNING);
+  await retainRefusal(f, artifacts, [{ path: 'report_json', message: 'findings.0.gating.verification.verdict contradicts the consensus gating reason in report_json' }]);
+  const before = await snapshot(f);
+  await expect(f.preview()).rejects.toThrow('terminal_rejection_rejection_diagnostics');
+  expect(await snapshot(f)).toEqual(before);
+});
+
+it('disposes a run refused for a blank appendix file and admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'blank-file'), before = await snapshot(f);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('applied');
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Blank-file producer fix verified; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('disposes a strict fallback refused only for its telemetry level and admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'level'), before = await snapshot(f);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('applied');
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Telemetry level full restored; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+});
+
+it('refuses a blank-file proof whose retained diagnostic names a finding that has a file', async () => {
+  const f = await fixture(false, 20, 'blank-file');
+  const { artifacts } = await stamp(f, RUNNING);
+  await retainRefusal(f, artifacts, [{ path: 'findings.0.file', message: 'Invalid text' }]);
+  const before = await snapshot(f);
+  await expect(f.preview()).rejects.toThrow('terminal_rejection_rejection_diagnostics');
   expect(await snapshot(f)).toEqual(before);
 });
 
 it.each(['outbox', 'reviewer-outbox'])('rechecks late %s before the next guarded claim', async queue => {
   const f = await fixture(), { input } = await f.prepare();
-  await applyTerminalRejection(input, f.common, f.dataDir);
+  await applyTerminalRejection(input, f.common, f.dataDir, RUNNING);
   await mkdir(join(f.dataDir, queue, f.selection.runId), { recursive: true, mode: 0o700 });
   const before = await readFile(f.attemptsPath);
   await expect(guardReviewLaunch({ ...f.options, retryReason: 'Cannot bypass late queued evidence', run: f.nextRun })).rejects.toThrow('pending_delivery');
@@ -288,7 +462,7 @@ it('the supported CLI previews, pins and idempotently applies synthetic recovery
 
 it.each(['missing', 'truncated'])('detects %s terminal audit before admission or another claim', async kind => {
   const f = await fixture(), { input } = await f.prepare();
-  await applyTerminalRejection(input, f.common, f.dataDir);
+  await applyTerminalRejection(input, f.common, f.dataDir, RUNNING);
   const state = JSON.parse(await readFile(f.nativePath, 'utf8'));
   if (kind === 'missing') delete state.terminalRejections; else state.terminalRejections = [];
   await writeFile(f.nativePath, JSON.stringify(state));

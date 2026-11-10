@@ -13,6 +13,7 @@ import { captureSupplementalAsync } from '../../src/report/supplemental-async.js
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { planGating } from '../../src/consensus/gating.js';
 import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
+import { toMarkdown } from '../../src/output/markdown.js';
 
 const runId = '00000000-0000-4000-8000-000000000159';
 const role = { name: 'general', systemPrompt: 'Review.', focus: [], description: 'General', isSpecialized: false };
@@ -114,6 +115,7 @@ export async function strictFallbackReviewerFixture(commonDir: string, terminal:
   await withNativeTarget(commonDir, plan.target, async ownership => {
     await journal.retainTerminalReport({ reportBytes, reviewerArtifactBytes: artifact.bytes }, ownership);
   });
-  return { runId, result: JSON.parse(reportBytes), artifacts: { report_json: reportBytes,
-    report_md: '# Strict fallback review' }, artifact, verificationProof };
+  const result = JSON.parse(reportBytes);
+  return { runId, result, artifacts: { report_json: reportBytes,
+    report_md: toMarkdown(result) }, artifact, verificationProof };
 }

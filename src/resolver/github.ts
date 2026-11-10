@@ -1,9 +1,11 @@
 import type { Octokit, RestEndpointMethodTypes } from '@octokit/rest';
+import { sourceExceedsReviewCapacity } from '../prepare/chunker.js';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
 import { createGitHubClient, getGitHubClientToken, getGitHubPullRequest } from './github-client.js';
 import { loadHostedPinnedGitDiff, loadPinnedGitDiff, PinnedGitObjectsUnavailableError } from './git.js';
 import { parseUnifiedDiff } from '../prepare/unified-diff.js';
+import { ancestorDirectories, generatedPathMatcher, leaveOutGenerated } from './generated-paths.js';
 
 export interface GitHubTarget {
   owner: string;
@@ -127,7 +129,9 @@ async function fetchChangedFiles(
         basehead: `${pr.base.sha}...${pr.head.sha}`,
       });
       files = data.files ?? [];
-      mergeBaseSha = data.merge_base_commit?.sha;
+      const comparisonBase = data.merge_base_commit?.sha;
+      mergeBaseSha = typeof comparisonBase === 'string' && /^[a-f0-9]{40}$/.test(comparisonBase)
+        ? comparisonBase : undefined;
     } catch {
       // A compare the API refuses (e.g. an object id it cannot resolve for
       // this repository) must not fail the review: the bracketed listing
@@ -178,6 +182,53 @@ async function fetchMergeBaseSha(octokit: Octokit, target: GitHubTarget, pr: Pul
     throw new Error('The exact PR comparison did not provide a valid effective merge base.');
   }
   return mergeBaseSha;
+}
+
+// A root .gitattributes is a few lines; a megabyte of one is not a policy
+// file, and reading it whole would only hide a problem.
+const MAX_ATTRIBUTES_BYTES = 1024 * 1024;
+
+const ATTRIBUTES_FILE = '.gitattributes';
+
+interface AttributesPolicy {
+  /** The root file's text; `''` for a symlink (git ignores it), `undefined` when the commit has none. */
+  root: string | undefined;
+  /** Directories below the root that hold their own `.gitattributes`, whatever its kind. */
+  directories: Set<string>;
+}
+
+/**
+ * The `.gitattributes` files of one commit, from one recursive tree listing.
+ * The tree, unlike the contents API, reports each entry's git mode, so a
+ * symlinked file is known as one (the contents API answers a symlink to a
+ * file with that file's content). Git lets a deeper file override the root
+ * and the root reader does not apply it, so a file below any directory listed
+ * here is never left out. Any failure propagates, and so does a listing GitHub
+ * truncated: a review that silently fell back to "nothing is generated" would
+ * read a different patch, and bind a different digest, than the same review on
+ * a healthy API.
+ */
+async function readAttributesPolicy(octokit: Octokit, target: GitHubTarget, ref: string): Promise<AttributesPolicy> {
+  const { data } = await octokit.git.getTree({ owner: target.owner, repo: target.repo, tree_sha: ref, recursive: 'true' });
+  if (data.truncated) {
+    throw new Error(`The tree of ${ref} is too large to list, so its ${ATTRIBUTES_FILE} files cannot be checked.`);
+  }
+  const entries = data.tree.filter((entry) =>
+    entry.type === 'blob' && entry.path !== undefined && (entry.path === ATTRIBUTES_FILE || entry.path.endsWith(`/${ATTRIBUTES_FILE}`))
+  );
+  const directories = new Set(
+    entries.filter((entry) => entry.path !== ATTRIBUTES_FILE).map((entry) => entry.path!.slice(0, -ATTRIBUTES_FILE.length - 1))
+  );
+  const root = entries.find((entry) => entry.path === ATTRIBUTES_FILE);
+  if (root === undefined) return { root: undefined, directories };
+  if (root.mode === '120000') return { root: '', directories };
+  if ((root.size ?? 0) > MAX_ATTRIBUTES_BYTES) {
+    throw new Error(`${ATTRIBUTES_FILE} at ${ref} exceeds ${MAX_ATTRIBUTES_BYTES.toLocaleString('en-US')} bytes.`);
+  }
+  if (root.sha === undefined) throw new Error(`${ATTRIBUTES_FILE} at ${ref} has no blob id.`);
+  const { data: blob } = await octokit.git.getBlob({ owner: target.owner, repo: target.repo, file_sha: root.sha });
+  if (blob.encoding !== 'base64') throw new Error(`${ATTRIBUTES_FILE} at ${ref} is not base64 encoded.`);
+  return { root: Buffer.from(blob.content, 'base64').toString('utf8'), directories };
 }
 
 export async function fetchPRDiff(
@@ -263,7 +314,7 @@ export async function fetchPRDiff(
     draft: pr.draft ?? false,
   };
 
-  const fileChanges: FileChange[] = files.map((f) => ({
+  const changes: FileChange[] = files.map((f) => ({
     filename: f.filename,
     status: f.status as FileChange['status'],
     additions: f.additions,
@@ -274,11 +325,33 @@ export async function fetchPRDiff(
     ...(f.sha ? { blobSha: f.sha } : {}),
   }));
 
+  // Generated paths the base commit declares are left out of the reviewed
+  // patch, but only when the full patch is more than one review can read: a
+  // PR that fits is reviewed whole, whatever its files are. The base — never
+  // the head — is the authority: a PR cannot switch review off for its own
+  // files by editing .gitattributes, and that edit is itself reviewed. An
+  // explicit capacity asks for the complete patch, so nothing is left out then.
+  const reviewable: FileChange[] = authoritative?.files ?? changes;
+  let leftOutResult: ReturnType<typeof leaveOutGenerated> = { files: reviewable };
+  const policy = options.maxDiffBytes === undefined && sourceExceedsReviewCapacity(reviewable)
+    ? await readAttributesPolicy(octokit, target, pr.base.sha)
+    : undefined;
+  if (policy?.root !== undefined) {
+    const isGenerated = generatedPathMatcher(policy.root);
+    leftOutResult = leaveOutGenerated(
+      reviewable,
+      (path) => isGenerated(path) && !ancestorDirectories(path).some((directory) => policy.directories.has(directory)),
+      pr.base.sha
+    );
+  }
+  const { files: fileChanges, leftOut } = leftOutResult;
+
   return {
-    files: authoritative?.files ?? fileChanges,
-    metadata,
+    files: fileChanges,
+    metadata: leftOut ? { ...metadata, leftOut } : metadata,
     source: 'github',
-    ...(authoritative?.rawDiff === undefined ? {} : { rawDiff: authoritative.rawDiff }),
+    // The raw diff is the complete patch; it would contradict files with paths left out.
+    ...(authoritative?.rawDiff === undefined || leftOut ? {} : { rawDiff: authoritative.rawDiff }),
   };
 }
 

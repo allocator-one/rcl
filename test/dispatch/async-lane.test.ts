@@ -6,13 +6,14 @@ vi.mock('../../src/telemetry/recovery/files.js', { spy: true });
 import * as crypto from 'node:crypto';
 import * as recoveryFiles from '../../src/telemetry/recovery/files.js';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   partitionAsyncAssignments,
   asyncTargetKey,
   resolveAsyncStoreDir,
+  findExistingAsyncStoreDir,
   spoolAsyncCalls,
   runAsyncWorker,
   collectAsyncResults,
@@ -454,6 +455,19 @@ describe('spool → worker → collect round trip', () => {
     expect(await collectAsyncResults(otherStore, key)).toEqual([]);
     expect(await collectAsyncResults(linkedStore, key)).toHaveLength(1);
     expect(await collectAsyncResults(store, key)).toEqual([]);
+  });
+
+  it('finds no async store where none was created, and still refuses an unsafe one', async () => {
+    const repo = join(dir, 'store-repo');
+    const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
+    execFileSync('git', ['init', '-q', repo], {
+      env: { ...process.env, GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice },
+    });
+    expect(await findExistingAsyncStoreDir(repo)).toBeUndefined();
+    const elsewhere = join(dir, 'elsewhere');
+    await mkdir(elsewhere);
+    await symlink(elsewhere, join(repo, '.git', 'rcl-async'));
+    await expect(findExistingAsyncStoreDir(repo)).rejects.toThrow('not a current-user plain directory');
   });
 
   it('does not collect results belonging to a different target', async () => {

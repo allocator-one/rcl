@@ -5,9 +5,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { convergeAttemptStatePath, loadConvergeAttemptState } from './attempt-budget.js';
 import { convergeRunStatePath, loadConvergeRunState } from './run-state.js';
 import { launchSchema } from './launch-record.js';
-import { prepareOrdinaryPendingGuardedInput, validateOrdinaryPendingPackage,
+import { guardedInputWithoutAsyncSeats, prepareOrdinaryPendingGuardedInput, validateOrdinaryPendingPackage,
   type OrdinaryPendingPackage, type PreparedOrdinaryPendingGuardedInput } from './ordinary-pending-package.js';
-import { MAX_ASYNC_CALLS_PER_ROUND, snapshotAsyncHistory, snapshotAsyncResults } from '../dispatch/async-lane.js';
+import { MAX_ASYNC_CALLS_PER_ROUND, snapshotAsyncHistory, snapshotAsyncResults,
+  type AsyncResultReference } from '../dispatch/async-lane.js';
+import type { ModelReview } from '../consensus/types.js';
 import { sha256Hex } from '../report/run-header.js';
 import { MAX_REPORT_BYTES, readStable } from '../telemetry/recovery/files.js';
 import { serializeRecoveryDocument, writeExclusiveBytes } from '../evidence/original-run/journal.js';
@@ -99,7 +101,7 @@ export async function retainOrdinaryLaunchInputs(options: OrdinaryLaunchInputs):
 
   const packetSha256 = sha256Hex(bytes);
   // A preclaim crash leaves the ordinal unspent. Include the full packet so
-  // a changed base (which the guarded-input digest omits) gets its own file.
+  // historical inputs whose digest omitted the base still get their own file.
   const path = retainedInputsPath({ ...options, gitCommonDir: common, packetSha256 });
   const directory = dirname(path);
   await mkdir(directory, { mode: 0o700 }).catch(error => {
@@ -139,7 +141,8 @@ interface OrdinaryPendingExportOptions {
   expectedRound?: number;
   guardedInput: Record<string, unknown>;
   guardedInputCapacity?: GuardedInputCapacity;
-  asyncStoreDir: string;
+  /** Undefined when no async reviewer ever ran here; only a zero-async ordinary launch may omit it. */
+  asyncStoreDir: string | undefined;
   asyncTargetKey: string;
   asyncDescriptors: Array<{ model: string; role: string; provider: string }>;
   path: string;
@@ -152,7 +155,7 @@ function ownerAlive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
-function retainedHistoricalInput(text: string, options: OrdinaryLaunchInputs,
+function retainedHistoricalInput(text: string, options: Omit<OrdinaryLaunchInputs, 'guardedInput'>,
   packetSha256: string): PreparedOrdinaryPendingGuardedInput {
   let value: unknown;
   try { value = JSON.parse(text); } catch { refuse('retained_input_mismatch'); }
@@ -172,6 +175,17 @@ function retainedHistoricalInput(text: string, options: OrdinaryLaunchInputs,
     refuse('retained_input_mismatch');
   }
   return prepared;
+}
+
+/** Read and authenticate the exact packet retained before a native ordinary launch claim. */
+export async function readRetainedOrdinaryLaunchInputs(
+  options: Omit<OrdinaryLaunchInputs, 'guardedInput' | 'asyncDescriptors'> & { packetSha256: string }
+): Promise<PreparedOrdinaryPendingGuardedInput> {
+  const common = await realpath(options.gitCommonDir);
+  const path = retainedInputsPath({ ...options, gitCommonDir: common });
+  const retained = await readStable(path, MAX_GUARDED_INPUT_CAPACITY.retainedBytes);
+  if (retained.sha256 !== options.packetSha256) refuse('retained_input_mismatch');
+  return retainedHistoricalInput(retained.text, options, options.packetSha256);
 }
 
 /**
@@ -221,18 +235,25 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   const historicalInput = binding ? retainedHistoricalInput(retainedBefore!.text, {
     gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
     attempt: launch.attempt, round: launch.round, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
-    guardedInput: options.guardedInput,
   }, binding.packetSha256) : currentInput;
   if (binding && !cycleBacked &&
       !isDeepStrictEqual(historicalInput.retained, currentInput.retained)) {
     refuse('retained_input_mismatch');
   }
   if (launch.inputSha256 !== historicalInput.inputSha256()) refuse('input_mismatch');
-
-  const snapshot = cycleBacked
-    ? await snapshotAsyncHistory(options.asyncStoreDir, options.asyncTargetKey,
-      Math.max(MAX_ASYNC_CALLS_PER_ROUND, (attempts.attemptsUsed + 1) * MAX_ASYNC_CALLS_PER_ROUND))
-    : await snapshotAsyncResults(options.asyncStoreDir, options.asyncTargetKey);
+  // Only an ordinary council without async seats can lack the store; any
+  // other launch's async evidence must be read from the store it wrote.
+  const storeDir = options.asyncStoreDir;
+  if (storeDir === undefined && (cycleBacked || !guardedInputWithoutAsyncSeats(historicalInput.input))) {
+    refuse('async_store_missing');
+  }
+  const snapshotStore = (expectedSha256?: readonly string[]) => storeDir === undefined
+    ? Promise.resolve({ reviews: [] as ModelReview[], artifacts: [] as AsyncResultReference[] })
+    : cycleBacked
+      ? snapshotAsyncHistory(storeDir, options.asyncTargetKey,
+        Math.max(MAX_ASYNC_CALLS_PER_ROUND, (attempts.attemptsUsed + 1) * MAX_ASYNC_CALLS_PER_ROUND), expectedSha256)
+      : snapshotAsyncResults(storeDir, options.asyncTargetKey, [], expectedSha256);
+  const snapshot = await snapshotStore();
   const identity = (item: { model: string; role: string; provider?: string }) =>
     JSON.stringify([item.model, item.role, item.provider]);
   const historicalRoster = Array.isArray(historicalInput.input.roster)
@@ -264,11 +285,7 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   const packet = validateOrdinaryPendingPackage(candidate,
     { ...candidate, inputSha256: launch.inputSha256 }, historicalInput);
   const [nativeAfter, attemptsAfter, asyncAfter] = await Promise.all([
-    readStable(nativePath), readStable(attemptPath),
-    cycleBacked
-      ? snapshotAsyncHistory(options.asyncStoreDir, options.asyncTargetKey,
-        Math.max(MAX_ASYNC_CALLS_PER_ROUND, (attempts.attemptsUsed + 1) * MAX_ASYNC_CALLS_PER_ROUND), retainedAsyncSha256)
-      : snapshotAsyncResults(options.asyncStoreDir, options.asyncTargetKey, [], retainedAsyncSha256),
+    readStable(nativePath), readStable(attemptPath), snapshotStore(retainedAsyncSha256),
   ]);
   if (nativeAfter.sha256 !== nativeBefore.sha256 || attemptsAfter.sha256 !== attemptsBefore.sha256 ||
       asyncAfter.artifacts.some((item, index) => item.path !== snapshot.artifacts[index]?.path) || ownerAlive(launch.pid)) refuse('state_changed');

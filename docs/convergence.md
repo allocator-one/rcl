@@ -32,12 +32,14 @@ enforced review evidence and CI (see
 - [Recovery](#recovery)
   - [Failed, unknown or inconclusive launches](#failed-unknown-or-inconclusive-launches)
   - [Ordinary pending launches with a dead coordinator](#ordinary-pending-launches-with-a-dead-coordinator)
+  - [Is a round still running? (`rcl converge-status`)](#is-a-round-still-running-rcl-converge-status)
   - [Bound fix recovery](#bound-fix-recovery)
   - [Launch intents](#launch-intents)
   - [`rcl converge-reconcile-history`](#rcl-converge-reconcile-history)
   - [`rcl converge-stale`](#rcl-converge-stale)
   - [`rcl converge-gap`](#rcl-converge-gap)
   - [`rcl converge-rejected`](#rcl-converge-rejected)
+  - [A round admitted against the wrong patch](#a-round-admitted-against-the-wrong-patch)
 - [`rcl converge-attempt` (legacy accounting)](#rcl-converge-attempt-legacy-accounting)
 
 ## Budgets: attempts and rounds
@@ -151,6 +153,15 @@ discovers the local cycle and continues its existing budget; it does not
 replenish it. A concurrent fresh request cannot silently create another cycle
 after waiting for the first.
 
+When Harness refuses to create the cycle (for example HTTP 404 for a
+repository its GitHub connection does not include, 422 for an invalid request,
+or a disabled organization) and its active cycle does not belong to this
+operation, the refusal is final: RCL restores the target's previous state, ends
+the operation and prints the server's status and reason. Fix the cause, then run
+`--start-over` again; it requests a new cycle. A server or network failure, or
+a refusal RCL cannot confirm, keeps the operation for a retry with the same
+command, and its message also names the status and reason.
+
 Stop an active review through its recorded host task before replacing it. Late
 reports and verdicts remain bound to their original cycle. After checking
 reviewer health and exact-head freshness, admit the report with
@@ -213,9 +224,13 @@ earlier dismissal reason. Each identity may appear once per command, and each
 fixed reason must be nonempty and unique. In a fresh review cycle, pass the
 report's run UUID with `--run-id`. Once every gating identity of the current
 round is triaged, it also reports the round's resolution:
-`converged-dismissal-only` (everything dismissed, nothing fixed — the round
-converges on the spot, with no confirmation round),
+`converged-dismissal-only` (everything dismissed, no gating finding fixed — the
+round converges on the spot, with no confirmation round),
 `fixes-pending-fresh-round`, or `unresolved` with the identities still open.
+Only a fix to a gating finding makes a round `fixes-pending-fresh-round`
+(`gatingFixedThisRound`). A fix to a non-gating finding counts in
+`fixedThisRound` but never buys another round, and a converged pull request is
+not pushed again for it (RCL-218).
 
 ```bash
 rcl converge-report --target rcl-30 --report report-r2.json --round 2 --json
@@ -267,6 +282,13 @@ After a failed or unknown dispatch, or an inconclusive report, continue with the
 same guarded review command plus an explicit bounded `--retry-reason`. The
 retry spends one more attempt within the existing caps.
 
+A completed launch whose blocking health was conclusive is not an
+infrastructure failure, even when a seat errored or returned `parse_failed`
+and the launch recorded `hardFailure`: the quorum already accounts for that
+seat. Once the report is admitted, continue on a changed head without
+`--retry-reason`, exactly as after a fully healthy round. Before admission it
+still needs normal admission or the audited stale path.
+
 For a 4.1.10, 4.1.11 or 4.1.12 aggregate-only completion, retain the original
 report and config and add `--retry-report original-report.json` with an
 explicit bounded `--retry-reason` and a fresh `--json-file` destination. RCL
@@ -283,6 +305,13 @@ retries its pending round; an exact latest admitted source whose blocking
 health was inconclusive continues at the next native round. Its original
 admission, findings, verdicts and spent claims remain unchanged. The new claim
 retains the source bytes and binding; no history or budget is reset.
+
+Launches from 4.2.0 onward record their own blocking health, so an
+inconclusive one needs no `--retry-report`: repeat the guarded review with
+`--retry-reason` alone. Adding `--retry-report` to such a launch refuses with
+`retry_report_current_health` before any claim and names the recorded seats.
+Any other `retry_report_invalid` refusal names the failed invariant in
+parentheses, such as `retry_report_binding_mismatch`.
 
 ### Pending launches with a dead coordinator
 
@@ -346,10 +375,25 @@ artifacts (`--resume-async-sha256`), and claims exactly the next checkpointed
 attempt under its explicitly bounded cap. It requires `--retry-reason`,
 `--evidence-required` and an explicit `--max-attempts`.
 
+If that checkpointed successor's host also dies, repeat its exact
+`--resume-pending` command with a fresh output path. It resumes the existing
+attempt and round, including at the attempt cap (for example, 2/2); it does not
+claim another attempt. Preview the same command with `--preview-pending` first:
+`resumedCheckpoint: true` and `runId` identify the reused checkpoint, and
+`nextAttempt` is the existing attempt rather than a new ordinal. The original
+package, head, inputs, plan, retained async artifacts and unchanged cap must
+still match. A live owner, missing journal or changed capture refuses before
+native state changes. The original deadline and physical-call limits remain
+in force. Completed calls are reused; if the terminal report was already
+retained, its exact bytes and reviewer artifact are delivered again without
+rerunning reviewers or verification.
+
 **Finalize only.** Use `--finalize-pending-only` when recovery must stop at
 that failed/unknown finalization. Like `--resume-pending`, it takes the
 retained async digests with `--resume-async-sha256` (`none` represents an
-authenticated cycle with no completed async artifacts). Pass the unchanged cap
+authenticated cycle with no completed async artifacts, or an ordinary package
+whose council had no async seats; an ordinary council with async seats must
+bind its retained results). Pass the unchanged cap
 plus the exact
 `nativeStateSha256` and `attemptStateSha256` returned by its preview as
 `--pending-native-sha256` and `--pending-attempt-sha256`. Apply archives the
@@ -376,6 +420,103 @@ before allowing the successor.
 Normal guarded launches, including fresh and existing cycles, retain their
 inputs before spending the claim, so an interrupted launch has a durable,
 digest-bound recovery source.
+
+### Is a round still running? (`rcl converge-status`)
+
+A round can stop without anyone hearing about it: a council killed by a host,
+or a converge worker that returned while its council ran in the background (a
+forked Claude Code skill takes its background tasks with it). The pending launch
+record stays, and a caller that waits for the worker's report waits forever.
+
+`rcl converge-status --target <target> [--head <sha>] [--json]` answers from
+the target's native state without changing it. A guarded review holds the
+target lock from preflight until it writes its terminal record, so:
+
+Guarded launches leave unrelated telemetry in the outbox for
+`rcl telemetry flush`; startup delivery cannot delay this acknowledgment or
+acquire another target lock while the launch owns its target.
+
+A marker bound to the current lock acquisition distinguishes retry preflight
+from an abandoned pending record. It clears when that invocation registers or
+resumes its council; the original claim and process identity stay unchanged.
+
+| Status | Meaning | Exit |
+| --- | --- | --- |
+| `launching` | The CLI accepted a convergence launch and holds the target during credential/config/diff preparation, before a pending round is registered | 0 |
+| `running` | A review process holds the target (also a resumed council, whose record still names its exited original process) | 0 |
+| `dead` | The latest launch is pending, its process is gone and nothing holds the target: nothing will finish the round | 6 |
+| `not_launched` | No launch reached `--head`, and nothing holds the target | 6 |
+| `completed` | The launch finished; `admitted` says whether `converge-report` has taken it | 0 |
+| `failed` | The launch recorded a failure; inspect it before any retry | 0 |
+| `idle` | No guarded launch is recorded (without `--head`) | 0 |
+
+`--target` takes the key the round launched under: query that key. A pull
+request named as `owner/repo#N` or by its URL also reads the other keys it
+launches under, the `<repo>-<N>` slug and `owner/repo#N`, and the key with the
+latest launch answers; `target` in the output is the key read and
+`requestedTarget` the value passed. A `<repo>-<N>` slug reads only its own
+key. It cannot tell a pull request's slug from a free-form key such as
+`rcl-7`, so it never looks up the `owner/repo#N` rounds of a repository, and a
+round launched under `owner/repo#N` is read by naming `owner/repo#N` or the
+pull request URL. A reference that names no key (`#N`, a bare number, an issue
+URL, a malformed `owner/repo#`) is refused with
+`converge_target_form_unsupported` and exit 3 instead of reporting
+`not_launched`, unless a round is recorded under that exact key.
+
+A registered live round reports its actual `launch.headSha`, even when `--head`
+names another commit. It remains `running`: the different requested head does
+not make the existing round a pre-registration launch. Wait for the target to
+be free before launching a round for another head.
+
+`--wait <minutes>` polls every `--interval` seconds (30 by default) while the
+round is launching or running and returns as soon as it finishes or dies, so a caller can
+wait on that instead of on a report that may never arrive. For `dead`, rerun
+the same guarded review command: an interrupted journaled council resumes
+without spending an attempt, and a `dispatch_unknown` refusal goes to the
+recovery paths in this section. For `not_launched`, launch the round.
+
+```bash
+rcl converge-status --target repo-123 --head "$(git rev-parse HEAD)" --wait 90 --json
+# exit 6: the round is abandoned; resume or launch it, do not keep waiting
+```
+
+### Interrupted councils
+
+A guarded launch with an exact head and base journals its council in
+`.git/rcl-checkpoints/`: an intent before every reviewer call, its result
+after. Scheduling, provider caps, reviewers and the quorum are unchanged.
+
+If the process ends before the council closes (killed, or a host time limit),
+rerun the exact same command. `--max-slice-minutes <n>` makes that boundary
+clean: after N minutes no new reviewer call starts, the running calls finish
+and are journaled, and RCL exits 5. Choose N at least one per-call timeout
+below the host's limit. When the recorded process has exited and the head,
+effective inputs and journal still match, RCL resumes the same attempt and
+round: it reuses every journaled result, keeps recorded failures, and runs only
+the calls that never finished. No attempt is claimed. A call that was in flight
+when the process ended may already be billed; it is dispatched at most once
+more, and a call interrupted twice stays canceled. Changed inputs, a live or
+unverifiable owner, or a missing journal keep the existing refusal of an
+unknown dispatch. An interrupted `--start-over` launch resumes through the same
+`--start-over` command, without requesting another cycle.
+
+A call that times out does not need a new attempt either. When every other
+call of a guarded council has finished and the blocking quorum is still unmet
+(under `quorumFraction: 1`, any timed-out blocking call), RCL dispatches each
+timed-out call one more time under the same journal before it closes the round:
+all seats, chunks, prompts and the quorum stay as launched, only the missing
+calls are paid again, and a call that stalls twice stays a timeout. A round
+already at its quorum, and a call that failed with an error rather than a
+timeout, are not dispatched again. (`rcl telemetry recover-reviewer` is a
+different tool: it delivers an already retained reviewer result to Harness and
+refuses with `reviewer_delivery_manifest_required` without a `--manifest`; it
+never re-runs a reviewer.)
+
+```bash
+rcl review owner/repo#123 --guarded-converge --converge-target repo-123 \
+  --evidence-required --max-slice-minutes 40 --json-file report.json
+# exit 5: the council is journaled; run the same command again to continue it
+```
 
 ### Bound fix recovery
 
@@ -605,9 +746,11 @@ outbox. `deliveryFailure: local-invalid` describes delivery, independently of
 reviewer quorum. It does not admit the report or authorize another review.
 Transport failures and spooled evidence retain their existing delivery gates.
 
-For an ordinary completed report rejected for missing verified-consensus
-gating labels, preview a disposition using its original report and exact
-digest:
+For an ordinary completed report that rcl itself refused before any network
+operation (missing verified-consensus gating labels, a blank finding file or
+title, an inconsistent verification, a strict fallback below telemetry level
+`full`, or any other local diagnostic), preview a disposition using its
+original report and exact digest:
 
 ```bash
 rcl converge-rejected --preview --target owner-repo-123 --run ORIGINAL_RUN_UUID \
@@ -620,10 +763,14 @@ rcl converge-rejected --apply --manifest /path/to/rejection-preview.json \
 
 The command verifies the original report, quarantine diagnostics and envelope,
 blocking health, run/head/input identity, cycle and latest spent attempt. It
-requires an exited coordinator and no admitted round or queued delivery. Valid
-reports, unsupported rejection classes, incomplete or conflicting proof, live
-or uncertain owners, and queued evidence refuse. Neither an empty outbox nor
-exit code 4 establishes terminal rejection.
+requires an exited coordinator and no admitted round or queued delivery. A
+refusal is disposable when the recorded diagnostics are all local (none names
+delivery) and either the running release refuses the report with the same
+diagnostics, or an older release recorded the refusal and the running release
+accepts the report. Transport or server refusals, a refusal the running release
+cannot confirm, incomplete or conflicting proof, live or uncertain owners, and
+queued evidence refuse. Neither an empty outbox nor exit code 4 establishes
+terminal rejection.
 
 Apply retains complete immutable evidence before an atomic native-state update;
 repeating the same apply is idempotent. The original reports, health, attempt
@@ -640,6 +787,53 @@ original producer to have exited. It rechecks for queued evidence at apply and
 before the later guarded claim. It never treats a server/transport refusal as
 that proof. Historical audits use their retained copies, so ordinary temporary
 source cleanup does not break subsequent review and admission.
+
+### Correcting only an unadmitted report’s base binding
+
+New guarded input digests include the resolved base commit as well as the head,
+patch, configuration and prompts. Correcting `--base-sha` therefore changes the
+inputs even when the head, patch and spec are byte-identical. Use the existing
+`converge-stale` preview/apply flow on the original unadmitted report, then
+continue the same target. Keep the original report and spent attempt; do not
+edit native state, invent a verdict or create a replacement target.
+
+Direct PR review binds to GitHub’s comparison merge base. A PR-bound patch with
+both commits available locally refuses a declared base that is not their
+common ancestor. Explicit historical pending-package export can reconstruct
+older input digests that lacked the base; it still checks the retained base
+receipt separately. Export and finalize-only may authenticate an original
+PR base from that receipt, even if it was the wrong base tip. They never
+dispatch a reviewer. After a successor replaces the original native marker,
+use an explicitly bound historical patch for finalization receipt replay.
+New launches and recovery successors never omit a resolved base to match old history.
+An already-claimed legacy recovery successor may retain its old digest only
+when its captured-input and plan digests still match exactly; that
+compatibility match never creates a new claim.
+The old input format also preserves unchanged-input refusals for an admitted
+legacy report, so upgrading alone cannot bypass inspection of its original
+blocking health. It never authorizes a review or checkpoint resume.
+
+### A round admitted against the wrong patch
+
+A round can be admitted before anyone notices that its patch was captured
+against the wrong base, for example the moving default-branch tip instead of
+the pull request's merge base. Its findings then describe changes the pull
+request does not make. None of the recoveries above applies:
+`converge-stale` covers only reports that were never admitted and refuses this
+one with `stale_report_not_unadmitted`. Classifying, dismissing or fixing the
+round's findings would record verdicts about code the pull request never
+changed.
+
+Leave the admitted round, its findings and its spent attempts as they are.
+Report the mismatch to the user with both bases and the captured patch digest,
+and ask whether to start a fresh review. Only on that request, run
+[`--start-over`](#start-a-fresh-review); for a patch file, capture it again from
+the merge base and pass it with `--for-pr` and `--head-sha`. The new review
+cycle reviews the corrected inputs with a fresh budget. Harness counts only the
+selected cycle's evidence for its gate, so the wrong-patch round stops counting
+but stays in history, neither fixed nor dismissed. It can never approve a
+merge: a new conclusive exact-head round and the enforced gate are still
+required.
 
 ## `rcl converge-attempt`
 

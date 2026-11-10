@@ -2,7 +2,8 @@ import type { RecoverySource } from './recovery-source.js';
 import { createHash } from 'node:crypto';
 import type { Config } from '../config/schema.js';
 import type { ResolvedGatingConfig } from '../consensus/gating.js';
-import type { Diff, FileChange } from '../resolver/types.js';
+import type { StrictFallbackMarker } from '../consensus/strict-fallback.js';
+import type { Diff, FileChange, LeftOutPaths } from '../resolver/types.js';
 import type { ReviewAssignment } from '../roles/types.js';
 import { detectProvider } from '../roles/dispatcher.js';
 import type { ReviewerEvidenceDescriptor } from './reviewer-evidence.js';
@@ -45,6 +46,8 @@ export interface RunTarget {
   base_ref?: string;
   /** SHA-256 over the canonical file/patch serialization (see diffDigest). */
   diff_sha256: string;
+  /** Generated files whose patch the council did not read; each is still bound in `diff_sha256`. */
+  left_out?: LeftOutPaths;
   files: number;
   additions: number;
   deletions: number;
@@ -89,6 +92,10 @@ export interface RunHeader {
     verification_reasoning_effort?: ResolvedGatingConfig['verificationReasoningEffort'];
     verification_timeout_ms: number;
     verification_pass_timeout_ms?: number;
+    /** The larger bound a pass applied when its workload stretched the configured one (RCL-206). */
+    verification_pass_effective_timeout_ms?: number;
+    /** Present only when the whole verification pass failed (`consensus/strict-fallback.ts`). */
+    strict_fallback?: StrictFallbackMarker;
   };
   spec?: { source: SpecSource; sha256: string };
   context_files: Array<{ path: string; sha256: string }>;
@@ -132,12 +139,17 @@ export interface RunHeaderInput {
     baseSha?: string;
     headRef?: string;
     baseRef?: string;
+    leftOut?: LeftOutPaths;
   };
   diff: Diff;
   roster: RosterEntry[];
   config: Config;
   thresholds: ResolvedThresholds;
   gating: ResolvedGatingConfig;
+  /** The failed verification pass's declaration, when this round fell back to severity gating. */
+  strictFallback?: StrictFallbackMarker;
+  /** The whole-pass bound the verification pass applied, when larger than the configured one. */
+  verificationPassEffectiveTimeoutMs?: number;
   spec?: { source: SpecSource; sha256: string };
   contextFiles?: Array<{ path: string; sha256: string }>;
   plan?: { focus: string };
@@ -509,6 +521,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
       ...(target.headRef !== undefined ? { head_ref: target.headRef } : {}),
       ...(target.baseRef !== undefined ? { base_ref: target.baseRef } : {}),
       diff_sha256: diffDigest(diff.files),
+      ...(target.leftOut !== undefined ? { left_out: target.leftOut } : {}),
       files: diff.files.length,
       additions: diff.files.reduce((sum, f) => sum + f.additions, 0),
       deletions: diff.files.reduce((sum, f) => sum + f.deletions, 0),
@@ -530,7 +543,10 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
       ...(input.gating.verificationReasoningEffort ? { verification_reasoning_effort: input.gating.verificationReasoningEffort } : {}),
       verification_timeout_ms: input.gating.verificationTimeoutMs,
       verification_pass_timeout_ms: input.gating.verificationPassTimeoutMs,
+      ...(input.verificationPassEffectiveTimeoutMs !== undefined
+        ? { verification_pass_effective_timeout_ms: input.verificationPassEffectiveTimeoutMs } : {}),
       ...(input.converge?.recovery_source ? { bound_classification_protocol: 1 as const } : {}),
+      ...(input.strictFallback ? { strict_fallback: { version: input.strictFallback.version, cause: input.strictFallback.cause } } : {}),
     },
     ...(input.spec ? { spec: { source: input.spec.source, sha256: input.spec.sha256 } } : {}),
     context_files: (input.contextFiles ?? []).map((c) => ({ path: c.path, sha256: c.sha256 })),

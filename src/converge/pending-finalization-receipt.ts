@@ -40,9 +40,13 @@ const receiptSchema = z.object({
   receiptDigest: digest,
 }).strict();
 
-/** Authenticate the one terminal transition that disposes an unknown cycle dispatch. */
+/**
+ * Authenticate the one terminal transition that disposes an unknown cycle dispatch.
+ * The receipt binds the round cap the state was finalized with; a caller that already
+ * applied a requested cap passes the persisted one.
+ */
 export async function verifyCyclePendingFinalization(common: string, state: ConvergeRunState,
-  launch: GuardedLaunchState): Promise<boolean> {
+  launch: GuardedLaunchState, roundCap: number = state.roundCap): Promise<boolean> {
   const recovery = launch.pendingRecovery;
   const packageDigest = recovery?.migrationPackageSha256;
   if (!state.cycle || launch.status !== 'failed' || !recovery || !packageDigest) return false;
@@ -58,7 +62,7 @@ export async function verifyCyclePendingFinalization(common: string, state: Conv
         receipt.attemptsUsed !== launch.attempt || receipt.nextFreeAttempt !== launch.attempt + 1 ||
         receipt.cap !== receipt.attemptCap || receipt.cycleId !== state.cycle.id ||
         receipt.operationId !== state.cycle.operationId || receipt.repo.toLowerCase() !== state.cycle.repo ||
-        receipt.prNumber !== state.cycle.prNumber || receipt.roundCap !== state.roundCap ||
+        receipt.prNumber !== state.cycle.prNumber || receipt.roundCap !== roundCap ||
         receipt.sourceNativeStateSha256 !== recovery.nativeStateSha256 ||
         receipt.sourceAttemptStateSha256 !== recovery.attemptStateSha256 ||
         receipt.retainedAsyncSha256.join(',') !== [...recovery.retainedAsyncSha256].sort().join(',')) return false;

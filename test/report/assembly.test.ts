@@ -97,7 +97,10 @@ describe('completed council terminal artifacts', () => {
     });
     expect(result.stats).toMatchObject({ totalReviews: 17, successfulReviews: 16, totalRawFindings: 32, totalDeduped: 32 });
     expect(result.findings).toHaveLength(32);
-    expect(result.findings.every((finding) => finding.gating === undefined && finding.consensus.models.length === 1)).toBe(true);
+    // The fallback is declared and labelled, never left for delivery to read as `none` (RCL-160).
+    expect(result.run.gating.strict_fallback).toEqual({ version: 1, cause: 'verification_pass_timeout' });
+    expect(result.findings.every((finding) => finding.gating?.reason === 'strict_fallback' &&
+      finding.gating.verification?.verdict === 'unavailable' && finding.consensus.models.length === 1)).toBe(true);
     expect(evaluateCiGate(result).exitCode).toBe(1);
     expect(warnings).toEqual([expect.stringMatching(/Gating pass failed .*VerificationPassTimeoutError:.*100ms.*severity gating/)]);
     expect(stages).toEqual(['computing consensus', 'assembling the terminal report']);
@@ -144,5 +147,31 @@ describe('completed council terminal artifacts', () => {
       { path: 'output.report_json', message: expect.stringMatching(/Could not write JSON:.*EEXIST/) },
     ]);
     expect(await readFile(jsonFile, 'utf8')).toBe('preserved');
+  });
+});
+
+describe('verifier task context (RCL-198)', () => {
+  it('refutes a critical finding against the spec the reviewers saw', async () => {
+    const role: Role = { name: 'general', systemPrompt: '', description: '', focus: [], isSpecialized: false };
+    const diff: Diff = { source: 'local', files: [{ filename: 'src/admin.ts', status: 'modified', language: 'typescript',
+      additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-deny();\n+allow();' }] };
+    const chunkReviews: ModelReview[] = [{ model: 'openai/reviewer', role: role.name, provider: 'openai', durationMs: 1,
+      status: 'success', findings: [{ id: 'raw', file: 'src/admin.ts', startLine: 1, endLine: 1, title: 'Admins can delete',
+        description: 'Deletion is no longer denied.', severity: 'critical', category: 'security' }] }];
+    const ask = vi.fn<AskFn>(async () => ({ model: 'openai/verifier', provider: 'openai', status: 'success', durationMs: 1,
+      text: '[{"id":"F1","verdict":"refuted","reason":"The spec requires admins to delete."}]' }));
+    const result = await assembleCompletedReview({
+      chunkReviews, arrivedAsync: [], asyncLaunched: 0, startTime: 0, roleMap: new Map([[role.name, role]]), diff,
+      config: { thresholds: { minConfidence: 0, minConsensusScore: 0 } },
+      gatingConfig: { mode: 'verified-consensus', minModels: 2, verificationModel: 'openai/verifier',
+        verificationTimeoutMs: 1_000, verificationPassTimeoutMs: 1_000 },
+      taskContext: { spec: 'Admins may delete any record.' },
+      run: { rclVersion: 'x', command: 'review', target: { kind: 'patch', headSha: 'a'.repeat(40) },
+        roster: [{ model: 'openai/reviewer', role: role.name, provider: 'openai', lane: 'blocking' }],
+        runner: { kind: 'agent' }, startedAt: new Date(0) },
+    }, { ask });
+    expect(ask.mock.calls[0]![2]).toContain('Admins may delete any record.');
+    expect(result.findings[0]!.gating).toMatchObject({ reason: 'none', verification: { verdict: 'refuted' } });
+    expect(result.run.ci_exit_code).toBe(0);
   });
 });

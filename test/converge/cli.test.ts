@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -23,6 +23,17 @@ function tempRepository(): string {
     env: { ...process.env, GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice },
   });
   return directory;
+}
+
+/** Commits a guard line a gating dismissal can quote (RCL-201) and returns the cited reason. */
+function commitCitedGuard(repo: string, why: string): string {
+  mkdirSync(join(repo, 'src'), { recursive: true });
+  writeFileSync(join(repo, 'src/guard.ts'), 'if (!allowed) return deny();\n');
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], {
+    cwd: repo, env: { ...process.env, GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice } });
+  git('add', 'src/guard.ts');
+  git('commit', '-q', '--allow-empty', '-m', 'guard');
+  return `${why}: src/guard.ts:1 \`if (!allowed) return deny();\``;
 }
 
 function runConvergeAttempt(args: string[], cwd = tempRepository()) {
@@ -111,11 +122,12 @@ describe('converge-verdict severity telemetry', () => {
         { cwd: repo, env, timeout: 10_000 });
       const classified = JSON.parse((await run(['converge-report', '--report', report])).stdout);
       const key = classified.findings[0].identity as string;
-      const result = JSON.parse((await run(['converge-verdict', '--dismissed', `${key}=synthetic guard reviewed`])).stdout);
+      const reason = commitCitedGuard(repo, 'synthetic guard reviewed');
+      const result = JSON.parse((await run(['converge-verdict', '--dismissed', `${key}=${reason}`])).stdout);
       expect(result.resolution.status).toBe('converged-dismissal-only');
       const verdict = events.find((event) => event.kind === 'verdicts_recorded');
       expect(verdict).toMatchObject({ run_id: runId, round: 1, payload: { verdicts: [
-        { identity_key: key, verdict: 'dismissed', severity: 'critical', reason: 'synthetic guard reviewed' },
+        { identity_key: key, verdict: 'dismissed', severity: 'critical', reason },
       ] } });
       expect(events.find((event) => event.kind === 'resolution')).toMatchObject({ run_id: runId,
         payload: { status: 'converged-dismissal-only', unresolved: 0 } });
@@ -124,7 +136,7 @@ describe('converge-verdict severity telemetry', () => {
       writeFileSync(laterReport, JSON.stringify({ run: { id: '019921a0-0000-7000-8000-000000000002',
         roster: healthyRoster, converge: { target: 'severity-test', round: 2 } }, reviews: healthyReviews, findings: [sampleFinding()] }));
       await run(['converge-report', '--report', laterReport], 2);
-      await run(['converge-verdict', '--dismissed', `${key}=original critical evidence reviewed`]);
+      await run(['converge-verdict', '--dismissed', `${key}=${commitCitedGuard(repo, 'original critical evidence reviewed')}`]);
       expect(events.filter((event) => event.kind === 'verdicts_recorded').at(-1)).toMatchObject({ run_id: runId,
         payload: { verdicts: [{ identity_key: key, severity: 'critical' }] } });
       const outcomes = readFileSync(join(repo, 'account/outcomes.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
@@ -213,5 +225,49 @@ describe('converge-attempt CLI', () => {
         cap: 1,
       },
     });
+  });
+});
+
+describe('converge-verdict cited dismissals (RCL-201)', () => {
+  function verdictCli(repo: string) {
+    const env = { PATH: process.env['PATH'], HOME: repo, XDG_CONFIG_HOME: join(repo, 'config'),
+      GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice, RCL_DATA_DIR: join(repo, 'account'),
+      HARNESS_API_TOKEN: '', HARNESS_API_URL: '', RCL_NO_HARNESS_KEYS: '1', NODE_NO_WARNINGS: '1' };
+    return (args: string[]) => spawnSync(process.execPath,
+      ['--import', tsxImport, cliEntrypoint, ...args, '--target', 'cited', '--round', '1', '--json'],
+      { cwd: repo, env, encoding: 'utf8', timeout: 10_000 });
+  }
+  function admit(repo: string, gating: 'verified' | 'none') {
+    const report = join(repo, 'report.json');
+    writeFileSync(report, JSON.stringify({ run: { id: sampleRunHeader().id, roster: healthyRoster, converge: { target: 'cited', round: 1 } },
+      reviews: healthyReviews, findings: [sampleFinding({ identity: 'claim', gating: { reason: gating } })] }));
+    const admitted = verdictCli(repo)(['converge-report', '--report', report]);
+    expect(admitted.status).toBe(0);
+    return JSON.parse(admitted.stdout).findings[0].identity as string;
+  }
+
+  it('refuses an uncited dismissal of a gating finding and records nothing', () => {
+    const repo = tempRepository();
+    const key = admit(repo, 'verified');
+    const refused = verdictCli(repo)(['converge-verdict', '--dismissed', `${key}=The caller already guards this.`]);
+    expect(refused.status).not.toBe(0);
+    expect(JSON.parse(refused.stderr).error.message).toMatch(new RegExp(`${key}: cite at least one line`));
+    const state = JSON.parse(readFileSync(join(repo, '.git/rcl-converge-runs', readdirSync(join(repo, '.git/rcl-converge-runs'))
+      .find(name => name.startsWith('cited'))!), 'utf8'));
+    expect(state.findings[key].verdict).toBeUndefined();
+  });
+
+  it('records a gating dismissal whose quote matches the reviewed code', () => {
+    const repo = tempRepository();
+    const key = admit(repo, 'verified');
+    const recorded = verdictCli(repo)(['converge-verdict', '--dismissed', `${key}=${commitCitedGuard(repo, 'Guarded')}`]);
+    expect(recorded.status).toBe(0);
+    expect(JSON.parse(recorded.stdout).resolution.status).toBe('converged-dismissal-only');
+  });
+
+  it('still accepts an uncited dismissal of a non-gating finding', () => {
+    const repo = tempRepository();
+    const key = admit(repo, 'none');
+    expect(verdictCli(repo)(['converge-verdict', '--dismissed', `${key}=Style preference only.`]).status).toBe(0);
   });
 });

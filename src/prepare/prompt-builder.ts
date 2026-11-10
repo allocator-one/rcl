@@ -9,6 +9,7 @@ import { ELIXIR_PROMPT_ADDITION } from '../prompts/languages/elixir.js';
 import { PYTHON_PROMPT_ADDITION } from '../prompts/languages/python.js';
 import { GENERIC_PROMPT_ADDITION } from '../prompts/languages/generic.js';
 import { formatChunkForPrompt, type Chunk } from './chunker.js';
+import type { TaskContext } from './task-context.js';
 import type { Role } from '../roles/types.js';
 
 const LANGUAGE_ADDITIONS: Record<string, string> = {
@@ -38,6 +39,8 @@ export interface PromptContext {
   contextDocs?: ContextDoc[];
   /** Plan-review mode: the "diff" is a plan document, not code. */
   plan?: { focus?: PlanFocus };
+  /** Bounded spec and pull request text shared by every reviewer (RCL-191). */
+  taskContext?: TaskContext;
 }
 
 export interface ContextDoc {
@@ -142,7 +145,7 @@ export async function buildPrompt(
   // Build user prompt
   const basePrompt = context?.plan ? buildPlanPrompt(context.plan.focus) : buildBasePrompt();
   const diffText = formatChunkForPrompt(chunk);
-  const secureSection = buildSecureDiffSection(diffText, contextDocs);
+  const secureSection = buildSecureDiffSection(diffText, contextDocs, context?.taskContext);
 
   const userPrompt = `${basePrompt}\n\n${secureSection}`;
 

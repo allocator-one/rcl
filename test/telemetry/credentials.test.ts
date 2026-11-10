@@ -25,6 +25,7 @@ describe('resolveHarnessCredential', () => {
     expect(resolved).toEqual({
       repoManaged: true,
       credential: { url: 'https://harness.example.test', token: 'aone_login', source: 'login' },
+      origin: { file: credentialsPath, reason: 'legacy login (the repo config names no org)' },
     });
     expect(credentialHost(resolved.credential!)).toBe('harness.example.test');
   });

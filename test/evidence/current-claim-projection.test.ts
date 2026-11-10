@@ -115,6 +115,19 @@ describe('current complete claim snapshot',() => {
     control.add(laterSource(control.f.disposition,2,false,'critical'));
     expect(control.run().claims[0]!.standing).toBe('dismissed');
   });
+  it('reopens an important dismissal on a later critical strict-fallback blocker',() => {
+    const f=setup('dismissed');
+    const source=laterSource(f.f.disposition,2,true,'critical');
+    reviseSource(source,report => {
+      report.run.gating={ mode: 'verified-consensus',min_models: 2,verification_timeout_ms: 600000,
+        strict_fallback: { version: 1,cause: 'verification_pass_timeout' } };
+      report.run.ci_exit_code=1;
+      report.findings[0].gating={ reason: 'strict_fallback',verification: { verdict: 'unavailable' } };
+    });
+    source.storedRun.findings[0].verification_verdict='unavailable';
+    f.add(source);
+    expect(f.run().claims[0]!.standing).toBe('pending');
+  });
   function laterVerdict(round=2) {
     const f=setup('dismissed');
     const source=laterSource(f.f.disposition,round,true,'critical');

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 4.5.9 - 2026-10-05
+## 4.5.38 - 2026-11-10
 
 - Admit explicitly bounded full-patch reviews above the ordinary 32-chunk limit
   while preserving the default limits, exact input retention, guarded review
@@ -11,12 +11,407 @@
   paid dispatch; incomplete GitHub file patches fail closed. The hosted gate
   accepts a current-head capacity label applied by a repository maintainer
   without changing the default workflow (RCL-162).
+
+## 4.5.37 - 2026-11-10
+
+- Report `launching` while an accepted convergence review prepares credentials,
+  configuration and its diff, before the round registers (RCL-236). Native
+  target ownership now covers that startup window, and `converge-status --wait`
+  waits through it. A PR-bound patch with a convergence target uses guarded
+  launch when no attempt was explicitly preclaimed, so its pending and completed
+  `lastLaunch` records remain visible outside review cycles too.
+
+## 4.5.36 - 2026-11-10
+
+- Resolve the temporary directories in `test/converge/fresh-review-close.test.ts`
+  to their real paths (RCL-237). On macOS `os.tmpdir()` is a symlink
+  (`/var/folders/…` to `/private/var/…`), so the fixtures tripped the review
+  cycle directory check, which correctly refuses a path that is not its own
+  real path. Three tests failed on a clean checkout there; the check is
+  unchanged.
+
+## 4.5.35 - 2026-11-10
+
+- Make `rcl converge-status` resolve a pull request by every form it accepts
+  (RCL-235). `--target owner/repo#N` or a pull request URL reported
+  `not_launched` for a round that was recorded under the `<repo>-<N>` slug, so
+  a lane using that form would relaunch a live round or wait on a dead one. A
+  pull request reference now also reads the slug and `owner/repo#N` keys and
+  answers from the one with the latest launch; a slug reads only its own key,
+  so query the key the round launched under. `--json` adds `requestedTarget`
+  when the answer came from another key than the one passed. A reference that
+  names no key (`#N`, a bare number, an issue URL) is refused with
+  `converge_target_form_unsupported` instead of reading as not launched.
+
+## 4.5.34 - 2026-11-10
+
+- Leave generated paths out of the reviewed patch of a PR (RCL-209). A release
+  that refreshes a bundled, served artifact (harness-cli#93 changed a 4.2 MB
+  OpenAPI spec and its generated help) could not be reviewed: the patch was
+  over the 64,000-line cap, so nothing could converge or pass the enforced
+  gate. For a PR whose full patch is over that cap, paths the base commit's
+  root `.gitattributes` marks `linguist-generated` now keep their file entry
+  (name, status, line counts and blob id, so `diff_sha256` still binds the full
+  head) but contribute no patch lines; a PR that fits is reviewed whole. The
+  base is the authority, never the head, so a PR cannot exempt its own files.
+  `run.target.left_out` records the reason, the commit, the count and up to 100
+  paths. Only a modified or deleted file is left out (an added or renamed one
+  stays reviewed), and so is any file below a directory with its own
+  `.gitattributes` (found in one recursive tree read; a truncated tree fails
+  the review) or under a rule the reader does not understand. A
+  `.gitattributes` the API cannot read fails the review instead of silently
+  reviewing a different patch.
+
+## 4.5.33 - 2026-11-10
+
+- Show which credential `rcl telemetry status` resolved (RCL-234). It now
+  prints the credential file path, the host and why that file won: an
+  org-scoped login for the repository's org, or the legacy `credentials.json`
+  and why no org-scoped login applied (no org in the repo config, no login on a
+  known host, or an org file naming a different host). `--json` adds
+  `credential.file` and `credential.reason`. The token is never printed, and
+  the reason names only the host, never user-info or a query from a stored URL.
+
+## 4.5.32 - 2026-11-09
+
+- Resume a checkpointed pending retry after its host dies even when the attempt
+  cap is exhausted (RCL-214). `--resume-pending --preview-pending` authenticates
+  the existing successor and its original package instead of requiring another
+  attempt. Recovery retains the run, round, spent claims, deadline and call
+  limits; a missing journal refuses before state changes. If the terminal report
+  was already retained, replay its exact bytes and reviewer artifact without
+  rerunning reviewers or verification.
+
+## 4.5.31 - 2026-11-09
+
+- Read the org-scoped login harness-cli writes, so evidence delivery and model
+  key fetches stop using a stale legacy token (RCL-211, RCL-212). harness-cli
+  1.16+ stores `harness login` in `credentials-org-<hash>.json` next to
+  `credentials.json` and leaves the legacy file as it was; once that token
+  expired, every evidence upload and `rcl evidence status` failed with HTTP 401
+  although `harness whoami` passed and logging in again changed nothing. In a
+  repository whose `.harness-cli/config.json` names an `org`, rcl now reads that
+  org's login first, as harness-cli does: under the default host, then the host
+  of the legacy login, then the hosts `harness login` approved in
+  `trusted-hosts.json`, and falls back to `credentials.json` as before. The
+  repository's own `url` is never used to choose a host.
+
+## 4.5.30 - 2026-11-09
+
+- Pin that `rcl` starts without `HOME` (RCL-207). A launch with `HOME`
+  stripped reads the stored Harness login from `XDG_CONFIG_HOME` and keeps
+  its outbox under `RCL_DATA_DIR`, falling back to the account's home from the
+  password database. The `$HOME is not defined` failure seen in such launches
+  came from the asdf shim in front of `rcl`, not from `rcl`; the `rcl` skill
+  now says why its launch allowlist keeps `HOME`.
+
+## 4.5.29 - 2026-11-09
+
+- Continue a guarded review on a changed head without `--retry-reason` when
+  the previous round reached its blocking quorum and was admitted, even though
+  one seat errored or returned `parse_failed` (RCL-205). Such a launch records
+  `hardFailure`, and the guard refused the next head with
+  `infrastructure_failure` although the quorum had already absorbed the
+  failed seat. Inconclusive or unadmitted launches still need the bounded
+  retry reason or their existing admission and stale paths, and admitted
+  inputs still refuse re-review.
+
+## 4.5.28 - 2026-11-09
+
+- Name the supported retry when `--retry-report` is given an inconclusive
+  launch that recorded its own blocking health (RCL-202). Since 4.2.0 a
+  completed launch stores its blocking seats natively, so the bounded retry
+  needs only `--retry-reason`; `--retry-report` proves health only for
+  4.1.10–4.1.12 aggregate-only launches. Such a launch was refused with the
+  generic `retry_report_invalid`, which read as a broken report. It now
+  refuses with `retry_report_current_health`, naming the recorded seats and
+  the `--retry-reason` path, before any claim. Other `retry_report_invalid`
+  refusals name the failed invariant, such as
+  `retry_report_binding_mismatch`. The legacy proof itself is unchanged.
+
+## 4.5.27 - 2026-11-09
+
+- Pin provider calls to HTTP/1.1 so concurrent reviewer calls stop failing under
+  Node 26 (RCL-213). Node 26's built-in `fetch` negotiates HTTP/2 and sends every
+  parallel call to a provider over one connection; when that connection reset,
+  the whole batch failed together (`Connection error.`, `terminated`,
+  `BAD_RECORD_MAC`) and multi-reviewer rounds ended inconclusive. `rcl` now
+  installs an `undici` dispatcher with HTTP/2 off at startup, so each call has
+  its own socket, as it did under Node 24. Lowering `concurrency` or running
+  Node 24 is no longer needed. With Node's environment proxy enabled (`NODE_USE_ENV_PROXY=1` or `--use-env-proxy`) the dispatcher keeps
+  honouring `HTTPS_PROXY`/`NO_PROXY`. A global dispatcher already set by a `--import`
+  preload (for example one that raises undici's headers timeout) is left in place.
+  Adds `undici` as a dependency.
+- Report a converge round that stopped without a report instead of leaving
+  callers to wait on it. A forked converge worker that returned while its
+  council ran in the background took the council with it, and two lanes then
+  waited about an hour on a round nothing would finish. New
+  `rcl converge-status --target <t> [--head <sha>]` reads native state
+  without changing it and reports `running` (a review process holds the
+  target), `dead` (the pending launch's process is gone), `not_launched`,
+  `completed` or `failed`, exiting 6 when the round is abandoned; `--wait`
+  polls until the round finishes or dies. The converge skill now tells a
+  worker never to return while its council runs and to check this command
+  whenever a round's progress is in doubt (RCL-232).
+
+## 4.5.26 - 2026-11-09
+
+- Re-dispatch a timed-out blocking call once inside a guarded council. A
+  four-seat review of a large pull request finished 11 of 12 calls twice, each
+  time losing the same kind of call to a provider stall at the 15 and 20 minute
+  limits; the round was inconclusive and the only supported way on was a new
+  attempt that paid all 12 calls again. When the other calls are done and the
+  blocking quorum is unmet, the council now runs each timed-out call one more
+  time under its journal, keeping every seat, chunk and the quorum, and a call
+  that stalls twice stays a timeout. Rounds already at quorum and calls that
+  failed with an error are unchanged (RCL-231).
+
+## 4.5.25 - 2026-11-07
+
+- Let `rcl converge-rejected` recover any report rcl refused locally, so a
+  refusal no longer strands the converge target until someone passes
+  `--start-over`. Until now only four named refusals (a missing gating label, a
+  blank finding file or title, a valid strict fallback below telemetry level
+  `full`, the 4.5.23 verdict refusal) were disposable; any other answered
+  `terminal_rejection_unsupported_local_rejection`. A refusal is now disposable
+  when the stored envelope projects from the report, no diagnostic is a
+  delivery one, and this release refuses the report with the same diagnostics
+  or an older release recorded the refusal and this one accepts the report. The
+  original report and quarantine stay retained, spent attempts stay spent, and
+  the next launch still needs a retry reason. An applied recovery is no longer
+  re-judged by later releases, only its retained bytes are checked (RCL-230).
+
+## 4.5.24 - 2026-11-06
+
+- Accept a critical or consensus finding whose verification is `confirmed`,
+  `insufficient_evidence` or `unavailable`. Since RCL-198 only a refutation
+  removes the tier such a finding earned, but the local report validator still
+  demanded no verification on it and refused a conclusive council's own report
+  (exit 4, then `terminal_rejection_proof_required`). `rcl converge-rejected`
+  also accepts a quarantined 4.5.23 report refused for that mismatch, once the
+  current validator accepts it, so a pull request stuck on one can launch its
+  bounded retry (RCL-228).
+
+## 4.5.23 - 2026-11-06
+
+- Stop a converged round from pushing the pull request into another one. A fix
+  to a non-gating finding no longer resolves a round as
+  `fixes-pending-fresh-round`; the resolution reports `gatingFixedThisRound`
+  next to `fixedThisRound`, and `converge-verdict` tells the agent to leave a
+  non-gating fix out of the PR. The `rcl-converge` skill now ends the loop at
+  a converged round with the head unchanged: no push for a non-gating fix, a
+  rebase or a merge of the base branch unless it conflicts, a branch rule
+  requires it, or the user asks (RCL-218).
+
+- Refuse a dismissal of a gating finding that does not quote the code it
+  relies on. `converge-verdict --dismissed` and `rcl evidence
+  retriage-finding` require at least one `path:line` or `path:start-end`
+  citation followed by the quoted code in backticks, and check each quote
+  against the cited lines of the reviewed commit. Nothing is recorded when a
+  quote is missing or does not match. Non-gating dismissals are unchanged
+  (RCL-201).
+
+- Verify critical and consensus findings before they gate, with the task
+  context (the `--spec` text and the pull request's title and description).
+  A refuted one no longer gates; any other verdict, including an unavailable
+  verifier, keeps its tier. Verifier contract version 3; version 1 and 2
+  captures replay unchanged (RCL-198).
+- Converge a round whose every new gating finding repeats a standing
+  dismissal: same file, category and lines within the dedupe window, with
+  both title and description overlap at the dedupe threshold. Those findings are classified
+  `suppressed` with the dismissed identity in their reason, and the ledger
+  entry records it as `repeatOf`. One genuinely new gating finding keeps the
+  round actionable, and escalation to critical still re-gates. A later
+  sighting of a suppressed repeat stays suppressed only while it still repeats
+  the dismissed lines; drift or escalation to critical re-gates it. New ledger
+  entries keep hashed description tokens for this match, never claim text
+  (RCL-199).
+
+## 4.5.22 - 2026-10-30
+
+- Let a review cycle run without GitHub credentials in the reviewer process.
+  `rcl pr-snapshot <owner/repo#N> --out <file>` captures the pull request's
+  head, base and open/merged state in a parent that holds the credential, and
+  `rcl review --pr-snapshot <file>` confirms the reviewed head from it instead
+  of calling GitHub, for `--start-over` and every round within a cycle. The
+  file is refused when another user could write it, when it names another pull
+  request, or when it is more than 15 minutes old (RCL-216).
+- Add `rcl converge-close-fresh --preview|--apply`, an audited close of a
+  fresh-review operation whose launch died before the council wrote anything.
+  It proves from native state that the launching process is dead, its council
+  journal holds no reviewer result and the cycle admitted no round, retains
+  the exact operation, run and attempt bytes it rested on, and marks the
+  operation terminal with a reference to the audit. It creates or releases no
+  round, finding, verdict or attempt (RCL-216).
+
+## 4.5.21 - 2026-10-30
+
+- Let an explicitly authorized bounded successor follow an authenticated
+  finalize-only cycle recovery. The recovery receipt is now verified against
+  the round cap it was issued on before a requested `--max-rounds` applies, and
+  a recovered unknown dispatch no longer refuses a fresh attempt at unchanged
+  exact inputs when a bounded retry reason is supplied. Attempts, caps and the
+  unknown provenance of the recovered dispatch stay cumulative, and the
+  successor starts a new journal instead of reusing the rejected attempt's.
+
+## 4.5.20 - 2026-10-26
+
+- Bind PR reviews to the comparison merge base instead of the moving base
+  tip, and refuse a locally checkable PR patch whose declared base is not
+  its common ancestor with the head. Include every resolved base in new
+  guarded input digests, so a base-only correction can use audited stale
+  recovery without changing the head, patch or spec. Historical pending
+  export and finalize-only retain their original input format and separate
+  base-receipt checks. Already-claimed legacy recovery successors remain
+  replayable only with the exact captured inputs and plan.
+  Clarify the capture steps in the generated converge skills (RCL-210).
+
+## 4.5.19 - 2026-10-21
+
+- Verify large reviews instead of falling back at a fixed deadline. The whole
+  verification pass's deadline now covers two waves of concurrent verifier
+  batches at the configured bound, then grows in proportion to the waves, up
+  to four times that bound. A review with 116 single-model candidates
+  (fifteen batches) gets 1,500 s instead of 600 s. The bound is derived from
+  the planned batches alone. The report records it as
+  `run.gating.verification_pass_effective_timeout_ms` when it exceeds the
+  configured `verification_pass_timeout_ms`. A pass that still overruns falls
+  back to the strict fallback as before. A per-call bound left at its default
+  follows the scaled pass, so one slow batch still ends at the pass deadline.
+  An attested review renews its run credential again just before delivery,
+  since a longer pass can outlast the one it renewed before verification.
+  Retained checkpoint plans keep their recorded bound (RCL-206).
+
+## 4.5.18 - 2026-10-21
+
+- Declare the strict fallback instead of leaving findings unlabelled when a
+  verified-consensus run's whole verification pass fails. Such a report was
+  refused before delivery, since an unlabelled finding reads as `none`.
+  Assembly now labels every kept critical or important finding
+  `strict_fallback` with verification `unavailable` and every other finding
+  `none`, and records `run.gating.strict_fallback` as `{version: 1, cause:
+  verification_pass_timeout | verification_pass_failed}`: the form Harness
+  accepts (IO-14611). The CI verdict stays the conservative severity gate.
+  Delivery checks that form exactly and still refuses unlabelled
+  verified-consensus findings and a `strict_fallback` label without the
+  marker. It refuses such a run at a telemetry level that never sends its
+  report, and does not report it complete when the organization takes no
+  `report_json`, which Harness needs before it counts the run. `rcl telemetry
+  flush` likewise fails a queued fallback whose report_json the outbox
+  dropped, never held, or the organization refuses, instead of reporting it
+  delivered. `rcl evidence recover-run` accepts a declared fallback and checks
+  it exactly. `rcl converge-rejected` can dispose of a fallback refused only
+  for its telemetry level. Claim recovery counts a `strict_fallback` blocker
+  as a gated sighting. Reports refused before this release stay refused
+  (RCL-160, RCL-167).
+
+## 4.5.17 - 2026-10-12
+
+- Recover an interrupted ordinary launch whose council had no async
+  reviewers. `--export-pending-package`, its preview, `--finalize-pending-only`
+  and `--resume-pending` now accept an ordinary package that retains no async
+  results, bound with `--resume-async-sha256 none`, when the original guarded
+  input declared no async roles or async roster seats. A launch whose council
+  had async seats but retained no results is still refused. Export of such a
+  zero-async ordinary launch no longer needs an async store the checkout never
+  created; every other export still requires it. Combined `--resume-pending`
+  now refuses any package for a cycle-backed launch, so a version-2 package
+  stripped of its cycle binding can no longer bypass cycle recovery (RCL-195).
+
+## 4.5.16 - 2026-10-12
+
+- Share bounded task context with every reviewer. The `--spec` text (up to
+  16 KiB) and, for a pull request target, its title (300 characters) and
+  description (4 KiB) now reach every role and chunk, including async
+  reviewers, as untrusted reference data in their own neutralized block;
+  `spec-compliance` still receives the full spec. Truncation is marked. A
+  review without a spec or PR text builds byte-identical prompts; one with
+  them sees its effective inputs change once across this upgrade, while
+  `--export-pending-package` still authenticates a pending launch recorded
+  with the earlier prompts (RCL-191).
+
+## 4.5.15 - 2026-10-11
+
+- Document the files-only `--context` contract. The `review` and
+  `review-plan` help and the README no longer promise directories: an
+  ordinary review warns and skips a directory, and a guarded review refuses to
+  launch. Context collection is unchanged (RCL-190).
+- End a fresh-review operation that Harness refused for good. A 4xx refusal or a
+  disabled organization, confirmed against the active cycle, now restores the
+  target and finishes the operation, so the next `--start-over` requests a new
+  cycle instead of reusing the refused one. Every refusal names the server's
+  HTTP status and reason (RCL-193).
+
+## 4.5.14 - 2026-10-11
+
+- Journal every guarded council's reviewer calls and resume an interrupted
+  council under its existing attempt and round. Rerunning the same command
+  after a kill, host timeout or the new `--max-slice-minutes` budget (no new
+  call after N minutes, running calls finish, exit 5) reuses every journaled
+  result and runs only the calls that never finished; a call in flight when a
+  process ended is dispatched at most once more.
+  Scheduling, provider caps, reviewers and quorum are unchanged, and a launch
+  without a matching journal keeps the unknown-dispatch refusal (RCL-80).
+- Document recovery for a round admitted against the wrong patch: leave it
+  and its findings untriaged, report the mismatch, and only when the user asks
+  start a fresh review with `--start-over` on a patch captured from the merge
+  base. Harness then counts only the new cycle's evidence, so the wrong-patch
+  round never approves a merge (RCL-129).
+
+## 4.5.13 - 2026-10-11
+
+- Drop a reviewer finding whose file or title is blank or contains NUL, as
+  a blank line number already is. The evidence protocol refuses such a
+  finding, and one refused finding left its whole converge target
+  unrecoverable. `rcl converge-rejected` now also disposes of a run refused
+  locally only because a finding's file or title was blank: it reads the
+  retained report through a proof-only schema and checks every recorded
+  diagnostic against the projected envelope row (RCL-189).
+- Wait up to 12 s for the Harness model-key fetch and retry it once after a
+  timeout, network error, 429 or 5xx. When it still fails, the note and a
+  `missing_provider_credentials` launch refusal name why, instead of listing
+  only the missing providers (RCL-188).
+
+## 4.5.12 - 2026-10-07
+
+- Preserve and authenticate retained ordinary input packets when recovering a
+  cycle-free legacy launch with an omitted exit code. Verify the exact packet
+  digest, guarded input hash, target, original report and launch bindings;
+  refuse missing, changed or inconsistent packets without altering history.
+  This covers the original RCL-187 record, including its retained base binding.
+  The 4.5.11 release was cancelled during validation before npm publication.
+
+## 4.5.11 - 2026-10-07
+
+- Recover delivery bookkeeping for a completed, cycle-free legacy hard-failure
+  launch whose terminal exit code was never recorded. Validate the original
+  attempt claim, authenticated stored report and blocking reviewer health
+  before binding a strong delivery receipt. Preserve the absent exit code,
+  original evidence and accounting; stale disposition and fresh exact-head
+  review remain required before a successor can approve a merge (RCL-187).
+
+## 4.5.10 - 2026-10-05
+
+- Verify the current unmerged GitHub pull request head during guarded review
+  cycle continuation. A stale Harness status projection no longer blocks a
+  review of the exact live head; a changed or merged pull request and an
+  unavailable authoritative read still fail closed. Preserve the original
+  cycle receipt and cumulative review accounting (RCL-185).
+
+## 4.5.9 - 2026-10-05
+
 - Activate an exact retained private reviewer outbox through the explicit
-  terminal reviewer recovery command when its server run is absent. Bind the
-  original manifest, envelope, declared reports and private artifact to the
-  authenticated local lineage; resume lost acknowledgements from server
-  readback without reviewer calls or accounting changes. Generic telemetry
-  flush continues to refuse unknown runs (RCL-183).
+  terminal reviewer preview/apply/resume operation when its server run is
+  absent. Pin the exact Harness principal, full envelope, JSON and Markdown,
+  private artifact and terminal lineage; journal an immutable pre-POST intent,
+  permit at most one activation POST, and require exact server readback plus a
+  separate recovery acknowledgement. Recovery transmits the retained envelope
+  and reports byte for byte, including optional Markdown, then clears only the
+  matching native delivery-pending marker without changing attempts or admitted
+  rounds. Reviewer calls stay unchanged, and generic telemetry flush and retry
+  cannot bypass an armed activation. Preserve
+  4.5.8's mode-less target/run delivery and JSON/exit contract when no private
+  outbox exists; retained outboxes require the explicit safe operation (RCL-183).
 - Add preview/apply/resume claim recovery on the existing native target, with
   explicit adoption of interrupted operations and read-only refresh of claim
   history. Preserve original evidence, attribution, unresolved findings and

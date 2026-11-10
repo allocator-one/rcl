@@ -2,7 +2,8 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { MAX_RECOVERY_CHECKPOINT_BYTES, MAX_RECOVERY_CHECKPOINTS, openJournal } from '../../src/evidence/original-run/journal.js';
+import { MAX_RECOVERY_CHECKPOINT_BYTES, MAX_RECOVERY_CHECKPOINTS,
+  MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES, openJournal } from '../../src/evidence/original-run/journal.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 
 const fault = vi.hoisted(() => ({ failures: 0, syncs: 0, entries: undefined as string[] | undefined }));
@@ -161,6 +162,61 @@ it('refuses an oversized checkpoint count before reading or parsing entries', as
   await openJournal(file, manifest, operation, 'apply');
   fault.entries = Array.from({ length: MAX_RECOVERY_CHECKPOINTS + 1 }, (_, index) => `${String(index + 1).padStart(8, '0')}.json`);
   await expect(openJournal(file, manifest, operation, 'resume')).rejects.toThrow('recovery_journal_checkpoint_limit');
+});
+
+it('reserves checkpoint count from the journal-owned sequence', async () => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  expect(() => journal.assertAppendCapacity(MAX_RECOVERY_CHECKPOINTS, 0)).not.toThrow();
+  expect(() => journal.assertAppendCapacity(MAX_RECOVERY_CHECKPOINTS + 1, 0))
+    .toThrow('recovery_journal_checkpoint_limit');
+  await journal.append('first');
+  expect(() => journal.assertAppendCapacity(MAX_RECOVERY_CHECKPOINTS - 1, 0)).not.toThrow();
+  expect(() => journal.assertAppendCapacity(MAX_RECOVERY_CHECKPOINTS, 0))
+    .toThrow('recovery_journal_checkpoint_limit');
+});
+
+it('reserves checkpoint bytes from the journal-owned retained byte count', async () => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  await journal.append('first', { retained: true });
+  const retainedBytes = Buffer.byteLength(await readFile(join(file, '00000001.json')));
+  const remaining = MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES - retainedBytes;
+  expect(() => journal.assertAppendCapacity(0, remaining)).not.toThrow();
+  expect(() => journal.assertAppendCapacity(0, remaining + 1))
+    .toThrow('recovery_journal_checkpoint_limit');
+});
+
+it.each([
+  [-1, 0], [1.5, 0], [Number.MAX_SAFE_INTEGER + 1, 0], [0, -1], [0, 1.5], [0, Number.MAX_SAFE_INTEGER + 1],
+])('refuses invalid append-capacity reservation inputs %s/%s', async (additionalCheckpoints, maximumAdditionalBytes) => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  expect(() => journal.assertAppendCapacity(additionalCheckpoints, maximumAdditionalBytes))
+    .toThrow('invalid_recovery_journal_capacity');
+});
+
+it('reserves exact planned checkpoint bytes alongside maximum-size future records', async () => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  const exact = { phase: 'prepared', data: { digest: 'b'.repeat(64) } };
+  const sevenMaximumRecords = Array.from({ length: 7 }, () => ({ maximumBytes: MAX_RECOVERY_CHECKPOINT_BYTES }));
+
+  expect(() => journal.assertAppendPlanCapacity([exact, ...sevenMaximumRecords])).not.toThrow();
+  expect(() => journal.assertAppendPlanCapacity([exact, ...sevenMaximumRecords,
+    { maximumBytes: MAX_RECOVERY_CHECKPOINT_BYTES }])).toThrow('recovery_journal_checkpoint_limit');
+});
+
+it.each([
+  [[{ phase: 'Invalid', data: null }]],
+  [[{ maximumBytes: -1 }]],
+  [[{ maximumBytes: MAX_RECOVERY_CHECKPOINT_BYTES + 1 }]],
+  [[{ phase: 'prepared', data: null, maximumBytes: 1 }]],
+])('refuses an invalid mixed append-capacity plan %#', async entries => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  expect(() => journal.assertAppendPlanCapacity(entries as any))
+    .toThrow('invalid_recovery_journal_capacity');
 });
 
 it('refuses an append that would make its own journal exceed the retained-byte limit', async () => {

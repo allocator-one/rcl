@@ -77,6 +77,7 @@ export function prepareCheckpointGating(assembly: CheckpointAssemblyInput): {
     verificationPassTimeoutMs: aggregation.gating.verificationPassTimeoutMs,
     diffFiles: assembly.diff.files,
     ...(aggregation.modelWeights === undefined ? {} : { modelWeights: new Map(aggregation.modelWeights.map(row => [row.model, row.weight])) }),
+    ...(aggregation.taskContext === undefined ? {} : { taskContext: { ...aggregation.taskContext } }),
   }, aggregation.verifierContractVersion ?? 1);
   return { derived, asyncExecution, plan, originalAsync, currentReviewerCalls };
 }

@@ -1,7 +1,7 @@
 import {
-  defaultCredentialsPath,
   findHarnessRepoConfig,
-  readStoredCredentials,
+  resolveLogin,
+  type LoginOrigin,
 } from '../config/harness.js';
 
 /**
@@ -31,6 +31,8 @@ export interface CredentialResolution {
   /** Whether the working tree belongs to a Harness-managed repository. */
   repoManaged: boolean;
   credential?: HarnessCredential;
+  /** The credential file (null for an environment pair) and why it was chosen; never the token. */
+  origin?: LoginOrigin | { file: null; reason: string };
   /** One line worth telling the user when no credential could be used. */
   note?: string;
 }
@@ -101,16 +103,22 @@ export async function resolveHarnessCredential(
         note: `HARNESS_API_URL must be an absolute https URL without user-info, query or fragment (http only for loopback hosts): ${hostOf(envUrl)}`,
       };
     }
-    return { repoManaged, credential: { url, token: envToken, source: 'env' } };
+    return {
+      repoManaged,
+      credential: { url, token: envToken, source: 'env' },
+      origin: { file: null, reason: 'HARNESS_API_TOKEN and HARNESS_API_URL are set' },
+    };
   }
 
-  const stored = await readStoredCredentials(options.credentialsPath ?? defaultCredentialsPath(env));
-  if (stored === null) {
+  const resolvedLogin = await resolveLogin({ env, cwd: options.cwd ?? process.cwd(),
+    ...(options.credentialsPath !== undefined ? { credentialsPath: options.credentialsPath } : {}) });
+  if (resolvedLogin === null) {
     return {
       repoManaged,
       note: 'not logged in to Harness — run `harness login` (or set HARNESS_API_TOKEN and HARNESS_API_URL in CI).',
     };
   }
+  const stored = resolvedLogin.credential;
   const storedUrl = normalizeUrl(stored.url);
   if (storedUrl === null) {
     return { repoManaged, note: `the stored Harness login names a host the token must not travel to in plain text: ${hostOf(stored.url)}` };
@@ -119,7 +127,7 @@ export async function resolveHarnessCredential(
   if (token === '') {
     return { repoManaged, note: 'the stored Harness login carries no token — run `harness login` again.' };
   }
-  return { repoManaged, credential: { url: storedUrl, token, source: 'login' } };
+  return { repoManaged, credential: { url: storedUrl, token, source: 'login' }, origin: resolvedLogin.origin };
 }
 
 /** The host name a status line may name (never the token). */

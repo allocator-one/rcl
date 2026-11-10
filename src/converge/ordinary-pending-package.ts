@@ -112,6 +112,16 @@ export function ordinaryPendingGuardedInput(value: OrdinaryPendingPackage): Reco
   return restoreGuardedInput(value.guardedInput);
 }
 
+/**
+ * Whether a guarded launch input declared no async reviewers at all: no async
+ * roles and no async roster seat. Only such a legacy ordinary launch may
+ * retain no async results; one with async seats and no results stays refused.
+ */
+export function guardedInputWithoutAsyncSeats(input: Record<string, unknown>): boolean {
+  return Array.isArray(input.asyncRoles) && input.asyncRoles.length === 0 && Array.isArray(input.roster) &&
+    !input.roster.some(seat => (seat as Record<string, unknown> | null)?.lane === 'async');
+}
+
 export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, expected: PendingLaunchIdentity,
   prepared?: PreparedOrdinaryPendingGuardedInput): OrdinaryPendingPackage {
   let input: Record<string, unknown> | undefined;
@@ -126,7 +136,8 @@ export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, ex
     throw new Error('ordinary_pending_package_mismatch');
   }
   const specPresent = !!input && Object.hasOwn(input, 'spec');
-  const keys = ['asyncRoles','config','diff','head','kind','pr','prompts','repo','roster',
+  const basePresent = !!input && Object.hasOwn(input, 'base');
+  const keys = ['asyncRoles',...(basePresent ? ['base'] : []),'config','diff','head','kind','pr','prompts','repo','roster',
     ...(specPresent ? ['spec'] : [])];
   const digest = (candidate: unknown): candidate is string => typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate);
   const structuredInput = input && (input.kind === 'patch' || input.kind === 'pr') && typeof input.repo === 'string' && /^[^/\s]+\/[^/\s]+$/.test(input.repo) &&
@@ -151,12 +162,13 @@ export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, ex
     !Number.isSafeInteger(value.attempt) || value.attempt < 1 || !Number.isSafeInteger(value.round) || value.round < 1 ||
     !Number.isSafeInteger(value.pid) || value.pid < 1 || !input || Object.keys(input).sort().join(',') !== keys.join(',') ||
     !Array.isArray(value.retainedAsyncSha256) || [...value.retainedAsyncSha256].sort().join(',') !== [...expected.retainedAsyncSha256].sort().join(',') || input.head !== value.headSha ||
+    (basePresent && input.base !== value.baseSha) ||
     (prepared ? prepared.inputSha256() : guardedInputSha256(input)) !== expected.inputSha256) throw new Error('ordinary_pending_package_mismatch');
   const cycleHistory = value.version === 2;
   const descriptorHashes = Array.isArray(value.retainedAsync)
     ? value.retainedAsync.map(item => item?.sha256).sort() : [];
   if (!structuredInput || !/^[a-f0-9]{40}$/.test(value.headSha) ||
-      (!cycleHistory && (!new Set(value.retainedAsyncSha256).size ||
+      (!cycleHistory && ((!value.retainedAsyncSha256.length && !guardedInputWithoutAsyncSeats(input)) ||
         new Set(value.retainedAsyncSha256).size !== value.retainedAsyncSha256.length)) ||
       value.retainedAsyncSha256.some(hash => !digest(hash)) || !Array.isArray(value.retainedAsync) ||
       value.retainedAsync.length !== value.retainedAsyncSha256.length ||

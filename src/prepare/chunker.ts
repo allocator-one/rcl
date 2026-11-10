@@ -121,6 +121,19 @@ function assertSourceFitsExpansionBounds(
   }
 }
 
+/** Whether the files' patches are over what one review can read losslessly (the limits `chunkDiff` enforces). */
+export function sourceExceedsReviewCapacity(
+  files: readonly FileChange[],
+  capacity: ReviewCapacity = DEFAULT_REVIEW_CAPACITY
+): boolean {
+  try {
+    assertSourceFitsExpansionBounds(files, capacity);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function invalidOversizedPatch(file: FileChange, line: number, reason: string): never {
   throw new Error(
     `Cannot safely split oversized patch for ${file.filename}: ${reason} at patch line ${line}`

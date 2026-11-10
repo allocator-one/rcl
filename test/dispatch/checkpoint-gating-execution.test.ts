@@ -100,7 +100,7 @@ describe('retained checkpoint verifier integration', () => {
   it('keeps deterministic and plain paths provider-free and refuses the wrong journal', async () => {
     const plain=await fixture({mode:'all-findings'}), factory=vi.fn();
     expect((await execute(plain,{askFactory:factory})).projection.disposition).toBe('plain');
-    const deterministic=await fixture({both:true});
+    const deterministic=await fixture({both:true,file:'other.ts'});
     expect((await execute(deterministic,{askFactory:factory})).projection.disposition).toBe('deterministic');
     const other=await fixture({id:'22222222-2222-4222-8222-222222222222'});
     await expect(execute(plain,{journal:other.journal,askFactory:factory})).rejects.toThrow('checkpoint_gating_execution_journal_mismatch');

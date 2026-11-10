@@ -56,6 +56,44 @@ describe('authoritative PR patch acquisition', () => {
       metadata: { headSha: head, baseSha: base, mergeBaseSha: mergeBase } });
   });
 
+  describe('generated paths left out of an over-capacity patch (RCL-209) alongside pinned acquisition', () => {
+    const hugePatch = `@@ -1 +1,70000 @@\n-x\n${Array.from({ length: 70_000 }, (_, i) => `+line ${i}`).join('\n')}\n`;
+    const spec: FileChange = { filename: 'spec/infraone.json', status: 'modified', additions: 70_000, deletions: 1,
+      patch: hugePatch, language: 'json', blobSha: 'e'.repeat(40) };
+    function withAttributes(f: ReturnType<typeof fixture>) {
+      const getTree = vi.fn().mockResolvedValue({ data: { truncated: false, tree: [
+        { type: 'blob', path: '.gitattributes', mode: '100644', sha: 'f'.repeat(40), size: 38 }] } });
+      const getBlob = vi.fn().mockResolvedValue({ data: { encoding: 'base64',
+        content: Buffer.from('spec/infraone.json linguist-generated\n').toString('base64') } });
+      (f.client as unknown as { git: object }).git = { getTree, getBlob };
+      return { getTree, getBlob };
+    }
+
+    it('reviews everything under an explicit capacity: nothing is left out and no attributes are read', async () => {
+      const f = fixture([complete, complete]);
+      const git = withAttributes(f);
+      vi.mocked(loadPinnedGitDiff).mockResolvedValue({ source: 'local', files: [complete, spec],
+        rawDiff: 'full pinned patch', mergeBaseSha: mergeBase });
+      const diff = await fetchPRDiff(target, undefined, f.client, { maxDiffBytes: 16 * 1024 * 1024 });
+      expect(git.getTree).not.toHaveBeenCalled();
+      expect(diff.metadata?.leftOut).toBeUndefined();
+      expect(diff.files.find(file => file.filename === 'spec/infraone.json')?.patch).toBe(hugePatch);
+      expect(diff.rawDiff).toBe('full pinned patch');
+    });
+
+    it('still leaves a generated path out of an over-cap patch recovered from pinned objects, without a stale raw diff', async () => {
+      const f = fixture([{ filename: 'spec/infraone.json', status: 'modified', additions: 0, deletions: 0, sha: 'e'.repeat(40) }]);
+      const git = withAttributes(f);
+      vi.mocked(loadPinnedGitDiff).mockResolvedValue({ source: 'local', files: [spec],
+        rawDiff: 'full pinned patch', mergeBaseSha: mergeBase });
+      const diff = await fetchPRDiff(target, undefined, f.client);
+      expect(git.getTree).toHaveBeenCalledWith(expect.objectContaining({ tree_sha: base }));
+      expect(diff.files).toEqual([expect.objectContaining({ filename: 'spec/infraone.json', patch: '' })]);
+      expect(diff.metadata?.leftOut).toMatchObject({ reason: 'linguist-generated', ref: base, count: 1 });
+      expect(diff).not.toHaveProperty('rawDiff');
+    });
+  });
+
   it('recovers changed text whose API patch and all line counts were omitted', async () => {
     const f = fixture([{ filename: 'a.ex', status: 'modified', additions: 0, deletions: 0, sha: 'd'.repeat(40) }],
       'diff --git a/a.ex b/a.ex\nindex eeeeeee..ddddddd 100644\n--- a/a.ex\n+++ b/a.ex\n@@ -1 +1 @@\n-old\n+new\n');

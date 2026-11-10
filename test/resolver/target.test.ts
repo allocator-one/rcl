@@ -32,6 +32,27 @@ function prDiff(over: Partial<NonNullable<Diff['metadata']>> = {}): Diff {
 const localDiff: Diff = { source: 'local', files: [] };
 
 describe('resolveReviewTarget', () => {
+  it('binds a PR review to its merge base rather than the moving base tip (RCL-210)', async () => {
+    const target = await resolveReviewTarget(prDiff({ mergeBaseSha: OTHER }), undefined, {});
+    expect(target.baseSha).toBe(OTHER);
+    expect(target.headSha).toBe(HEAD);
+  });
+
+  it('refuses a locally checkable PR patch bound to the base tip (RCL-210)', async () => {
+    await expect(resolveReviewTarget(localDiff, undefined,
+      { headSha: HEAD, baseSha: BASE, forPr: 'allocator-one/rcl#42' },
+      { resolveMergeBase: async () => OTHER })).rejects.toThrow(/merge base/i);
+  });
+
+  it('keeps a vouched patch base when it is the merge base or local history is unavailable', async () => {
+    for (const actual of [BASE, undefined]) {
+      const target = await resolveReviewTarget(localDiff, undefined,
+        { headSha: HEAD, baseSha: BASE, forPr: 'allocator-one/rcl#42' },
+        { resolveMergeBase: async () => actual });
+      expect(target.baseSha).toBe(BASE);
+    }
+  });
+
   it('binds a PR to the head and base SHAs GitHub returned', async () => {
     const target = await resolveReviewTarget(prDiff(), undefined, {});
     expect(target).toEqual({

@@ -173,11 +173,62 @@ describe('harness key distribution', () => {
       cwd: repo,
       env: {},
       credentialsPath,
+      sleep: async () => {},
       fetchImpl: (async () => {
         throw new Error('network down');
       }) as typeof fetch,
     });
     expect(result.injected).toEqual([]);
+  });
+
+  it('retries a timed-out key fetch once and injects the keys it then returns', async () => {
+    const env: Record<string, string | undefined> = {};
+    let calls = 0;
+    const result = await applyHarnessModelKeys({
+      cwd: repo,
+      env,
+      credentialsPath,
+      sleep: async () => {},
+      fetchImpl: (async () => {
+        calls++;
+        if (calls === 1) throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+        return new Response(JSON.stringify(KEYS_RESPONSE), { status: 200 });
+      }) as typeof fetch,
+    });
+    expect(calls).toBe(2);
+    expect(result.injected).toEqual(['anthropic', 'openrouter']);
+    expect(result.fetchFailure).toBeUndefined();
+  });
+
+  it('names a key fetch that keeps timing out', async () => {
+    const result = await applyHarnessModelKeys({
+      cwd: repo,
+      env: {},
+      credentialsPath,
+      sleep: async () => {},
+      fetchImpl: (async () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      }) as typeof fetch,
+    });
+    expect(result.injected).toEqual([]);
+    expect(result.fetchFailure).toMatch(/timed out/);
+    expect(result.note).toContain(result.fetchFailure);
+  });
+
+  it('does not retry a refusal the backend would repeat', async () => {
+    let calls = 0;
+    const result = await applyHarnessModelKeys({
+      cwd: repo,
+      env: {},
+      credentialsPath,
+      sleep: async () => {},
+      fetchImpl: fakeFetch(() => {
+        calls++;
+        return { status: 401 };
+      }),
+    });
+    expect(calls).toBe(1);
+    expect(result.fetchFailure).toContain('HTTP 401');
   });
 
   it('ignores malformed credentials and unknown/blank served keys', async () => {

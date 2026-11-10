@@ -4,7 +4,10 @@ import { guardedDeliveryState } from './telemetry/deliver.js';
 import { AmbiguousReviewerIdentityError, assertUnambiguousReviewerIdentities } from './dispatch/reviewer-identity.js';
 import { retainAssemblyRefusal } from './output/assembly-refusal.js';
 import { createReviewCycleRemote } from './converge/cycle-remote.js';
-import { assertNoPendingFreshReview, freshReviewOutputPaths } from './converge/fresh-review.js';
+import { prSnapshotFrom, readPrSnapshot, writePrSnapshot } from './converge/pr-snapshot.js';
+import { applyFreshReviewClose, previewFreshReviewClose } from './converge/fresh-review-close.js';
+import { inspectRoundLiveness, roundLivenessExitCode, waitForRoundOutcome } from './converge/round-liveness.js';
+import { assertNoPendingFreshReview, freshReviewOutputPaths, freshReviewRequestVersion } from './converge/fresh-review.js';
 import { previewStaleReport, applyStaleReport } from './converge/stale-report.js';
 import { previewHistoricalDeliveryReconciliation,
   applyHistoricalDeliveryReconciliation } from './converge/historical-delivery-reconciliation.js';
@@ -15,6 +18,7 @@ import { readdir, readFile, writeFile } from 'fs/promises';
 import { hostname } from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
+import { installHttp1Transport } from './dispatch/http1-transport.js';
 import { loadConfig } from './config/loader.js';
 import { applyHarnessModelKeys } from './config/harness.js';
 import {
@@ -30,6 +34,7 @@ import {
 import { resolveProviderConcurrency } from './config/provider-concurrency.js';
 import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from './resolver/github.js';
 import { resolvePRCapacity, type PRCapacityAuthorization } from './resolver/pr-capacity-authority.js';
+import { createGitHubClient, getGitHubPullRequest } from './resolver/github-client.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
 import { loadPlanAsDiff } from './resolver/plan.js';
@@ -37,6 +42,7 @@ import { isPlanFocus, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js
 import { chunkDiff, DEFAULT_REVIEW_CAPACITY, MAX_REVIEW_CAPACITY, validateReviewCapacity, type ReviewCapacity } from './prepare/chunker.js';
 import { CAPTURED_INPUT_HARD_LIMITS, type CapturedInputCapacity } from './dispatch/captured-inputs.js';
 import { buildPrompt, loadContextDocs as loadPromptContextDocs } from './prepare/prompt-builder.js';
+import { buildTaskContext } from './prepare/task-context.js';
 import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
 import { resolveRoles, findProjectRulesFile } from './roles/loader.js';
 import { historicalExecutionPlan, legacyPendingClaimRoles } from './converge/legacy-roster.js';
@@ -49,6 +55,7 @@ import {
   partitionAsyncAssignments,
   asyncTargetKey,
   resolveAsyncStoreDir,
+  findExistingAsyncStoreDir,
   resolveExistingAsyncStoreDir,
   spoolAsyncCalls,
   launchAsyncWorkers,
@@ -105,7 +112,9 @@ import {
 } from './converge/run-state.js';
 import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
 import { withNativeTarget } from './converge/target-ownership.js';
-import { guardReviewLaunch, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions } from './converge/launch-guard.js';
+import { withLaunchPreflight } from './converge/launch-phase.js';
+import { guardReviewLaunch, ReviewCouncilInterrupted, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions,
+  type OrdinaryCheckpoint } from './converge/launch-guard.js';
 import { selectCurrentRecoveredProduction, type RecoveredProduction } from './converge/recovered-production.js';
 import { createBoundFixRecovery } from './converge/bound-fix-recovery.js';
 import { openReadSink } from './telemetry/read-sink.js';
@@ -173,9 +182,12 @@ import { runRefutationRecovery, type RefutationRecoveryOptions } from './telemet
 import { parseRepoName } from './evidence/target.js';
 import { text } from './evidence/format.js';
 import { loadConvergeRunState } from './converge/run-state.js';
+import { checkDismissalCitations, dismissalRequiresCitation, gitRevisionReader, reviewedRevision } from './converge/dismissal-citations.js';
+import { readPendingTerminalReport } from './converge/pending-terminal-report.js';
 import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch, resumePendingLegacyLaunch,
   type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
-import { ordinaryPendingGuardedInput, type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
+import { guardedInputWithoutAsyncSeats, ordinaryPendingGuardedInput,
+  type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
 import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs,
   MAX_ORDINARY_PENDING_PACKAGE_BYTES, ordinaryPendingPackageByteLimit } from './converge/ordinary-pending-export.js';
 import { MAX_GUARDED_INPUT_CAPACITY, type GuardedInputCapacity } from './converge/guarded-input-retention.js';
@@ -183,7 +195,9 @@ import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
 import { resolveFinalizedAsyncExecution } from './dispatch/checkpoint-async-store.js';
 import type { SealedAsyncProof } from './dispatch/checkpoint-async-context.js';
-import { exportCheckpointProof, type CheckpointProof } from './dispatch/checkpoint.js';
+import type { NativeTargetOwnership } from './converge/target-ownership.js';
+import { CheckpointJournal, checkpointPath, exportCheckpointProof, type CheckpointProof, type FrozenCheckpointPlan } from './dispatch/checkpoint.js';
+import { runJournaledCouncil } from './dispatch/journaled-council.js';
 import { captureAggregationInputs, AGGREGATION_ALGORITHM } from './report/aggregation-inputs.js';
 import { decodeSupplementalAsync } from './report/supplemental-async.js';
 import { projectCheckpointReport } from './report/checkpoint-projection.js';
@@ -192,7 +206,7 @@ import { assembleCheckpointReview, type CheckpointAssemblyInput } from './report
 import type { SealedVerificationProof } from './report/checkpoint-gating.js';
 import { describeReviewerEvidence } from './report/reviewer-evidence.js';
 import { serializeReviewerArtifact } from './report/reviewer-artifact.js';
-import { deliverTerminalReviewerRun } from './telemetry/terminal-reviewer-delivery.js';
+import { deliverTerminalReviewerRun, type TerminalReviewerDeliveryResult } from './telemetry/terminal-reviewer-delivery.js';
 
 const RCL_VERSION: string = JSON.parse(
   await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
@@ -337,7 +351,7 @@ program
   )
   .option(
     '--context <path>',
-    'Context file or directory to include (repeatable)',
+    'Context file to include (repeatable); a directory is not read',
     (val: string, prev: string[]) => {
       prev.push(val);
       return prev;
@@ -364,6 +378,7 @@ program
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--start-over', 'Start an explicitly requested fresh review with a new normal budget; retain all prior evidence and spending')
+  .option('--pr-snapshot <path>', 'Live pull request state from `rcl pr-snapshot`, captured by a parent that holds GitHub credentials; review cycles read it instead of GitHub (RCL-216)')
   .option('--guarded-converge', 'Validate and claim inside this review process, or consume an exact recovered-v3 --attempt; derive the round from native state')
   .option('--bound-fix-recovery <run-id>', 'Review unchanged inputs once live Harness evidence proves a retained bound fix obligation after this native dismissal-only run')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
@@ -380,6 +395,7 @@ program
   .option('--resume-async-sha256 <hashes>', 'Comma-separated SHA-256 bindings for every legacy async result retained as historical evidence')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
+  .option('--max-slice-minutes <n>', 'Guarded convergence: start no new reviewer call after N minutes; running calls finish, then exit 5. Rerunning the same command resumes without a new attempt')
   .option('--max-rounds <n>', 'Guarded convergence: explicitly authorized round cap (2–99; omitting preserves the cap)')
   .option('--max-review-chunks <n>', 'Explicit full-patch capacity, up to 512 lossless chunks (default 32)')
   .option('--max-blocking-calls <n>', 'Explicit paid-work capacity, up to 8192 blocking calls (default 512)')
@@ -414,7 +430,7 @@ program
   )
   .option(
     '--context <path>',
-    'Context file or directory to include (repeatable)',
+    'Context file to include (repeatable); a directory is not read',
     (val: string, prev: string[]) => {
       prev.push(val);
       return prev;
@@ -576,13 +592,13 @@ program
       if (opts.preview) {
         if (opts.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
         const manifest = await previewTerminalRejection({ target: opts.target as string, runId: opts.run as string,
-          reportPath: opts.report as string, reportSha256: opts.reportSha256 as string, reason: opts.reason as string }, common, dataDir);
+          reportPath: opts.report as string, reportSha256: opts.reportSha256 as string, reason: opts.reason as string }, common, dataDir, RCL_VERSION);
         await writeExclusive(opts.manifest as string, manifest, 16384);
         result = { mode: 'preview', manifest, manifestSha256: sha256(serializeRecoveryDocument(manifest)) };
       } else {
         if ([opts.target, opts.run, opts.report, opts.reportSha256, opts.reason].some(v => v !== undefined)) throw new Error('apply_uses_only_pinned_manifest');
         result = { mode: 'apply', result: await applyTerminalRejection({ manifest: opts.manifest as string,
-          manifestSha256: opts.manifestSha256 as string }, common, dataDir) };
+          manifestSha256: opts.manifestSha256 as string }, common, dataDir, RCL_VERSION) };
       }
       console.log(JSON.stringify({ ...result as object, accounting: 'unchanged',
         scope: 'local terminal disposition only; no admission, upload, provider calls or approval' }));
@@ -665,6 +681,95 @@ program
       console.log(JSON.stringify({...result as object,accounting:'unchanged',scope:'local stale disposition only; no admission, provider calls or approval'}));
     } catch (error) {
       console.error(JSON.stringify({error:{code:'RCL_CONVERGE_STALE',message:error instanceof Error?error.message:String(error)}}));
+      process.exitCode = 3;
+    }
+  });
+
+program
+  .command('pr-snapshot <pr>')
+  .description('Capture a pull request\'s live state (head, base, open/merged) for a review process that holds no GitHub ' +
+    'credentials: run it in the parent, then pass the file to `rcl review --pr-snapshot` within 15 minutes (RCL-216)')
+  .requiredOption('--out <path>', 'New file to write (refuses an existing one); readable by its owner only')
+  .option('--config <path>', 'Path to config file')
+  .option('--json')
+  .action(async (pr: string, opts: { out: string; config?: string; json?: boolean }) => {
+    try {
+      if (!isGitHubTarget(pr)) throw new Error('pr_snapshot_requires_pull_request');
+      const target = parseGitHubTarget(pr);
+      const config = await loadConfig(opts.config);
+      const { data } = await getGitHubPullRequest(await createGitHubClient(config.githubToken), target);
+      const snapshot = prSnapshotFrom(`${target.owner}/${target.repo}`, target.number, data);
+      const digest = await writePrSnapshot(opts.out, snapshot);
+      console.log(opts.json ? JSON.stringify({ snapshot, path: opts.out, sha256: digest })
+        : `Wrote ${opts.out}: ${snapshot.repo}#${snapshot.prNumber} ${snapshot.state} at ${snapshot.headSha} (sha256 ${digest})`);
+    } catch (error) {
+      console.error(JSON.stringify({ error: { code: 'RCL_PR_SNAPSHOT', message: error instanceof Error ? error.message : String(error) } }));
+      process.exitCode = 3;
+    }
+  });
+
+program
+  .command('converge-close-fresh')
+  .description('Preview or apply an audited close of a fresh-review operation whose launch died before writing any report; ' +
+    'never creates a round, finding, verdict or attempt (RCL-216)')
+  .option('--preview')
+  .option('--apply')
+  .option('--target <target>')
+  .option('--operation <uuid>', 'The fresh-review operation to close (its native current operation)')
+  .requiredOption('--manifest <path>', 'Exclusive preview manifest; the reviewed manifest for apply')
+  .option('--manifest-sha256 <sha256>', 'Exact reviewed manifest bytes; required for apply')
+  .option('--json')
+  .action(async (opts: Record<string, string | boolean | undefined>) => {
+    try {
+      if ([opts.preview, opts.apply].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_fresh_close_mode');
+      const gitCommonDir = await resolveGitCommonDir();
+      let result: unknown;
+      if (opts.preview) {
+        if (opts.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
+        if (typeof opts.target !== 'string' || typeof opts.operation !== 'string') throw new Error('fresh_close_preview_arguments_required');
+        const manifest = await previewFreshReviewClose({ target: opts.target, operationId: opts.operation }, gitCommonDir);
+        await writeExclusive(opts.manifest as string, manifest, 256 * 1024);
+        result = { mode: 'preview', manifest, manifestSha256: sha256(serializeRecoveryDocument(manifest)), accounting: 'unchanged',
+          scope: 'local operation close; no admission or approval' };
+      } else {
+        if (opts.target !== undefined || opts.operation !== undefined) throw new Error('apply_uses_only_pinned_manifest');
+        result = { mode: 'apply', result: await applyFreshReviewClose({ manifest: opts.manifest as string,
+          manifestSha256: opts.manifestSha256 as string }, gitCommonDir), accounting: 'unchanged',
+          scope: 'local operation close; no admission or approval' };
+      }
+      console.log(JSON.stringify(result));
+    } catch (error) {
+      console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_CLOSE_FRESH', message: error instanceof Error ? error.message : String(error) } }));
+      process.exitCode = 3;
+    }
+  });
+
+program
+  .command('converge-status')
+  .description('Report whether the target\'s latest converge round is launching, running, dead, not launched or finished, ' +
+    'without changing any state. Exit 6 means the round is abandoned: its launching process is gone and nothing will finish it (RCL-232)')
+  .requiredOption('--target <target>')
+  .option('--head <sha>', 'The head a round is expected for; a live round reports its actual head')
+  .option('--wait <minutes>', 'Keep polling while the round is launching or running, up to this many minutes; return as soon as it finishes or dies')
+  .option('--interval <seconds>', 'Polling interval for --wait', '30')
+  .option('--json')
+  .action(async (opts: { target: string; head?: string; wait?: string; interval: string; json?: boolean }) => {
+    try {
+      if (opts.head !== undefined && !/^[a-f0-9]{40}$/.test(opts.head)) throw new Error('head_must_be_a_full_commit_sha');
+      const gitCommonDir = await resolveGitCommonDir();
+      const base = { gitCommonDir, target: opts.target, ...(opts.head ? { headSha: opts.head } : {}) };
+      let liveness;
+      if (opts.wait === undefined) {
+        liveness = await inspectRoundLiveness(base);
+      } else {
+        const minutes = Number(opts.wait), seconds = Number(opts.interval);
+        if (!Number.isFinite(minutes) || minutes <= 0 || !Number.isFinite(seconds) || seconds < 1) throw new Error('invalid_wait_or_interval');
+        liveness = await waitForRoundOutcome({ ...base, timeoutMs: minutes * 60_000, intervalMs: seconds * 1_000 });
+      }
+      console.log(opts.json ? JSON.stringify(liveness) : `${liveness.target}: ${liveness.status} — ${liveness.message}`);
+      process.exitCode = roundLivenessExitCode(liveness);
+    } catch (error) {
+      console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_STATUS', message: error instanceof Error ? error.message : String(error) } }));
       process.exitCode = 3;
     }
   });
@@ -963,7 +1068,7 @@ program
   )
   .option(
     '--dismissed <key=reason>',
-    'Finding identity dismissed, with reason (repeatable)',
+    'Finding identity dismissed, with reason; a gating dismissal must cite path:line `quoted code` (repeatable)',
     (val: string, prev: string[]) => {
       prev.push(val);
       return prev;
@@ -1027,6 +1132,7 @@ program
           gitCommonDir,
           target,
           async ownership => {
+            await assertCitedGatingDismissals(gitCommonDir, target, round, verdicts);
             const recorded = await recordVerdicts({
               gitCommonDir,
               target,
@@ -1112,9 +1218,15 @@ program
               case 'converged-dismissal-only':
                 console.log(
                   `Round ${round} resolution: all ${resolution.actionable} gating finding(s) dismissed, ` +
-                    'nothing fixed — the reviewed patch is unchanged, so this round CONVERGES. ' +
+                    'no gating finding fixed — this round CONVERGES. ' +
                     'No confirmation round is required (RCL-30).'
                 );
+                if (resolution.fixedThisRound > 0) {
+                  console.log(
+                    `${resolution.fixedThisRound} non-gating fix(es) recorded. They never buy another round, ` +
+                      'and a converged PR is not pushed again for them (RCL-218): leave them out of the PR.'
+                  );
+                }
                 break;
               case 'fixes-pending-fresh-round':
                 console.log(
@@ -1150,17 +1262,29 @@ const telemetry = program
 
 telemetry
   .command('recover-reviewer')
-  .description('Deliver one exact retained terminal reviewer report without restarting reviewers or verification')
-  .requiredOption('--target <target>', 'Exact guarded convergence target')
-  .requiredOption('--run <id>', 'Exact retained terminal run UUID')
+  .description('Recover one terminal reviewer delivery without restarting reviewers')
+  .option('--preview', 'Write a pinned manifest without changing the server')
+  .option('--apply', 'Apply one exact reviewed recovery manifest')
+  .option('--resume', 'Resume the same journaled recovery operation')
+  .option('--manifest <path>', 'Immutable recovery manifest path; required for preview, apply or resume')
+  .option('--manifest-sha256 <sha256>', 'Required exact manifest digest for apply or resume')
+  .option('--target <target>', 'Exact guarded convergence target (preview or legacy no-outbox delivery)')
+  .option('--run <id>', 'Exact retained terminal run UUID (preview or legacy no-outbox delivery)')
   .option('--json', 'Output JSON')
-  .action(async (opts: { target: string; run: string; json?: boolean }) => {
+  .action(async (opts: { preview?: boolean; apply?: boolean; resume?: boolean; manifest?: string;
+    manifestSha256?: string; target?: string; run?: string; json?: boolean }) => {
     try {
       const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION });
-      const result = await deliverTerminalReviewerRun(runtime, { target: opts.target, runId: opts.run });
+      const result = await deliverTerminalReviewerRun(runtime, { preview: opts.preview, apply: opts.apply, resume: opts.resume,
+        manifest: opts.manifest, manifestSha256: opts.manifestSha256, target: opts.target, runId: opts.run });
       if (opts.json) console.log(JSON.stringify(result, null, 2));
-      else console.log(`${result.outcome.line}\nReport ${result.reportSha256}; reviewer artifact ${result.reviewerArtifactSha256}`);
-      process.exitCode = result.outcome.exitCode;
+      else if (!('status' in result)) {
+        const legacy = result as TerminalReviewerDeliveryResult;
+        console.log(`${legacy.outcome.line}\nReport ${legacy.reportSha256}; reviewer artifact ${legacy.reviewerArtifactSha256}`);
+      }
+      else if (result.status === 'prepared') console.log(`Recovery manifest ${result.manifest}\nSHA-256 ${result.manifest_sha256}\nOperation ${result.operation_id}`);
+      else console.log(`Reviewer recovery complete for ${result.run_id}\nJournal ${result.journal}\nAcknowledgement ${result.recovery_acknowledgement}`);
+      process.exitCode = !('status' in result) ? (result as TerminalReviewerDeliveryResult).outcome.exitCode : 0;
     } catch (error) {
       const message = scrubText(error instanceof Error ? error.message : String(error), 300);
       if (opts.json) console.error(JSON.stringify({ error: { code: 'RCL_TERMINAL_REVIEWER_DELIVERY', message } }));
@@ -1204,7 +1328,12 @@ telemetry
       level: runtime.level,
       repoManaged: runtime.repoManaged,
       credential: runtime.credential
-        ? { source: runtime.credential.source, host: credentialHost(runtime.credential) }
+        ? {
+            source: runtime.credential.source,
+            host: credentialHost(runtime.credential),
+            file: runtime.credentialOrigin?.file ?? null,
+            reason: runtime.credentialOrigin?.reason ?? null,
+          }
         : null,
       note: runtime.note ?? null,
       outbox: { dir: runtime.outbox.dir, entries, pendingLoss: loss, refusedLoss: refused },
@@ -1224,6 +1353,8 @@ telemetry
         ? `Credential: ${status.credential.source} → ${status.credential.host}`
         : `Credential: none${status.note ? ` (${status.note})` : ''}`
     );
+    if (status.credential?.file) console.log(`  File: ${status.credential.file}`);
+    if (status.credential?.reason) console.log(`  Why: ${status.credential.reason}`);
     console.log(`Outbox: ${runtime.outbox.dir} — ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`);
     for (const entry of entries) {
       console.log(
@@ -1658,6 +1789,8 @@ type Spinner = ReturnType<typeof ora>;
 
 /** CLI options shared by every council-running command. */
 interface CouncilCliOpts {
+  /** Internal ownership held from accepted CLI preflight through the terminal launch record. */
+  launchOwnership?: NativeTargetOwnership;
   role?: string;
   roles?: string;
   reviewer?: string[];
@@ -1684,6 +1817,8 @@ interface CouncilCliOpts {
   /** Converge context, or the RCL_CONVERGE_* environment the skill exports. */
   convergeTarget?: string;
   forPr?: string;
+  /** A parent's `rcl pr-snapshot` file: the live PR state, read without GitHub credentials. */
+  prSnapshot?: string;
   round?: string;
   attempt?: string;
   guardedConverge?: boolean;
@@ -1706,6 +1841,7 @@ interface CouncilCliOpts {
   previewPending?: boolean;
   resumeAsyncSha256?: string;
   maxAttempts?: string;
+  maxSliceMinutes?: string;
   maxRounds?: string;
   maxReviewChunks?: string;
   maxBlockingCalls?: string;
@@ -1745,6 +1881,8 @@ interface PreparedCouncil {
   recoveredProduction?: RecoveredProduction;
   /** When the command started; the run header records the full wall time. */
   startedAt: Date;
+  /** Why the Harness model-key fetch failed, named by a missing-credentials refusal. */
+  keyFetchFailure?: string;
 }
 
 /**
@@ -1757,12 +1895,13 @@ interface PreparedCouncil {
  * degradation (dropping openrouter models without OPENROUTER_API_KEY) must
  * see any injected keys.
  */
-async function fetchHarnessKeys(spinner: Spinner, credential?: HarnessCredential): Promise<void> {
-  const { note } = await applyHarnessModelKeys(credential ? { credential } : {});
+async function fetchHarnessKeys(spinner: Spinner, credential?: HarnessCredential): Promise<string | undefined> {
+  const { note, fetchFailure } = await applyHarnessModelKeys(credential ? { credential } : {});
   if (note) {
     spinner.info(note);
     spinner.start('Loading configuration...');
   }
+  return fetchFailure;
 }
 
 async function prepareCouncil(
@@ -1793,7 +1932,7 @@ async function prepareCouncil(
     throw new ReviewLaunchRefused('preclaimed_attempt_ineligible',
       'An explicit guarded attempt may only hand off the exact standalone claim for recovered-v3 production.');
   }
-  if (!opts.exportPendingPackage) await fetchHarnessKeys(spinner, attestation?.credential);
+  const keyFetchFailure = opts.exportPendingPackage ? undefined : await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config, undefined, { preserveDefaultRoster: opts.guardedConverge });
 
   // Validate mutually exclusive role options
@@ -2008,6 +2147,7 @@ async function prepareCouncil(
     } } : {}) } } : {}),
     ...(recoveredProduction ? { recoveredProduction } : {}),
     startedAt,
+    ...(keyFetchFailure ? { keyFetchFailure } : {}),
   };
 }
 
@@ -2028,7 +2168,14 @@ async function discoverCycleReview(target: string | undefined, opts: CouncilCliO
   catch (error) { if (opts.startOver) throw error; return opts; }
   if (!opts.startOver) await assertNoPendingFreshReview(common, targetKey);
   const active = opts.startOver ? undefined : await loadConvergeRunState(common, targetKey);
-  if (!opts.startOver && !active?.cycle) return opts;
+  if (!opts.startOver && !active?.cycle) {
+    const context = resolveConvergeContext(opts, reviewConvergeEnvironment(opts));
+    // A PR-bound convergence patch must register its launch even outside a
+    // fresh cycle. Keep explicitly preclaimed legacy invocations unchanged.
+    const boundPatch = target && !isGitHubTarget(target) && !opts.staged && !opts.workingTree;
+    return boundPatch && context && context.attempt === undefined && !opts.attest
+      ? { ...opts, guardedConverge: true } : opts;
+  }
   const recoveredPreclaim = active?.version === 3 && opts.guardedConverge && opts.attempt !== undefined;
   if ((opts.attempt !== undefined && !recoveredPreclaim) || (opts.startOver && opts.round !== undefined) || opts.attest) {
     throw new Error('A fresh review assigns its own ordinals and needs an ordinary actor credential');
@@ -2111,9 +2258,10 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       throw new ReviewLaunchRefused('pending_preview_incompatible', '--preview-pending requires one pending recovery mode and --ordinary-pending-package, without --retry-report.');
     }
     if (!opts.exportPendingPackage) opts = { ...opts, ...await discoverCycleReview(target, opts) };
-    // Finalize-only is a recovery-state operation even though it is exposed by
-    // `review`; preview and apply must not flush unrelated review evidence.
-    if (!opts.exportPendingPackage && !opts.finalizePendingOnly && !opts.cycleReview && opts.telemetry !== false &&
+    // Guarded launches must acknowledge ownership before network work. Leave
+    // unrelated evidence queued for an explicit flush, which may acquire its
+    // own target locks. Recovery preview/apply also leave that queue untouched.
+    if (!opts.guardedConverge && !opts.launchOwnership && !opts.exportPendingPackage && !opts.finalizePendingOnly && !opts.cycleReview && opts.telemetry !== false &&
       (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() !== 'off') {
       try {
         if ((await readdir(join(resolveDataDir(), 'outbox')).catch(() => [])).length > 0) {
@@ -2121,9 +2269,26 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         }
       } catch { /* Startup delivery remains best-effort for legacy reviews. */ }
     }
+    if (opts.guardedConverge && !opts.launchOwnership && !opts.exportPendingPackage &&
+      !opts.finalizePendingOnly && !opts.resumePending) {
+      const context = resolveConvergeContext(opts, reviewConvergeEnvironment(opts));
+      if (!context) throw new ReviewLaunchRefused('target_required', 'A guarded launch requires --converge-target.');
+      const common = await resolveGitCommonDir();
+      const requestVersion = opts.startOver ? await freshReviewRequestVersion(common, context.target) : undefined;
+      return await withNativeTarget(common, context.target, ownership => withLaunchPreflight(ownership, common, context.target, async () => {
+        if (opts.startOver && await freshReviewRequestVersion(common, context.target) !== requestVersion) {
+          throw new ReviewLaunchRefused('fresh_review_request_changed',
+            'Another launch handled the pending fresh request; inspect its outcome before requesting another cycle.');
+        }
+        await runReview(target, { ...opts, launchOwnership: ownership });
+      }), { lockTimeoutMs: 5_000 });
+    }
     if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined || opts.retryReport !== undefined ||
-      opts.maxAttempts !== undefined || opts.maxRounds !== undefined)) {
-      throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason and launch caps require --guarded-converge.');
+      opts.maxAttempts !== undefined || opts.maxRounds !== undefined || opts.maxSliceMinutes !== undefined)) {
+      throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason, launch caps and slice budgets require --guarded-converge.');
+    }
+    if (opts.maxSliceMinutes !== undefined && (!/^[1-9]\d{0,3}$/.test(opts.maxSliceMinutes) || Number(opts.maxSliceMinutes) > 1440)) {
+      throw new ReviewLaunchRefused('invalid_slice_budget', '--max-slice-minutes must be a whole number of minutes from 1 to 1440.');
     }
     if (opts.guardedConverge) {
       const converge = resolveConvergeContext(opts, reviewConvergeEnvironment(opts));
@@ -2247,6 +2412,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       }
     } else {
       diff = await fetchPRDiff(prTarget!, config.githubToken, undefined, {
+        requireMergeBase: true,
         ...(explicitDiffCapacity === undefined ? {} : { maxDiffBytes: explicitDiffCapacity }),
       });
     }
@@ -2263,6 +2429,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       gitMode,
       {
         ...opts,
+        historicalPendingRecovery: opts.exportPendingPackage !== undefined || opts.finalizePendingOnly === true,
         convergeTarget: opts.convergeTarget ?? process.env['RCL_CONVERGE_TARGET'],
         // The flag is the user's word and is refused off a patch file; a value
         // left in the environment only ever attributes a patch file.
@@ -2320,7 +2487,33 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       console.error(err);
     }
     process.exitCode = opts.guardedConverge && (err instanceof ConvergeAttemptBudgetExceededError || err instanceof ConvergeRoundCapError)
-      ? 2 : opts.guardedConverge && (err instanceof ConvergeAttemptStateError || err instanceof ConvergeRunStateError) ? 3 : 1;
+      ? 2 : opts.guardedConverge && (err instanceof ConvergeAttemptStateError || err instanceof ConvergeRunStateError) ? 3
+        : opts.guardedConverge && err instanceof ReviewCouncilInterrupted ? 5 : 1;
+  }
+}
+
+/**
+ * Refuse a gating dismissal that does not quote, on its cited lines, the code
+ * the round reviewed (RCL-201). Runs before any verdict is written.
+ */
+async function assertCitedGatingDismissals(gitCommonDir: string, target: string, round: number,
+  verdicts: ReadonlyArray<{ key: string; verdict: 'fixed' | 'dismissed'; reason?: string }>): Promise<void> {
+  const state = await loadConvergeRunState(gitCommonDir, target);
+  if (!state) return;
+  const gated = verdicts.filter(v => v.verdict === 'dismissed' && dismissalRequiresCitation(state, round, v.key));
+  if (gated.length === 0) return;
+  const launch = state.version === 3
+    ? (await (await import('./converge/attempt-budget.js')).loadConvergeAttemptState(gitCommonDir, target))?.lastLaunch
+    : state.lastLaunch;
+  const read = gitRevisionReader(process.cwd(), reviewedRevision(launch, round));
+  const problems: string[] = [];
+  for (const { key, reason } of gated) {
+    const problem = await checkDismissalCitations(reason ?? '', read);
+    if (problem) problems.push(`${key}: ${problem}`);
+  }
+  if (problems.length > 0) {
+    throw new ConvergeRunStateError(
+      `A dismissal of a gating finding must quote the code it relies on (RCL-201). No verdict was recorded.\n${problems.join('\n')}`);
   }
 }
 
@@ -2384,11 +2577,15 @@ async function prepareCouncilWork(
     throw new ReviewLaunchRefused('unreadable_context', `Required context could not be read: ${skipped.join(', ')}`);
   }
   for (const path of skipped) console.warn(`Context file not readable, not included in the review: ${path}`);
+  // One bounded copy of the spec and PR text for every reviewer and chunk (RCL-191).
+  const taskContext = buildTaskContext({ specContent: prepared.specContent,
+    ...(diff.source === 'github' && diff.metadata ? { pr: { title: diff.metadata.title, body: diff.metadata.body } } : {}) });
   const prompts = await Promise.all(chunkAssignments.map(({ assignment, chunk }) => buildPrompt(chunk, assignment.role, {
     contextDocs,
     plan: focus === undefined ? undefined : { focus },
+    ...(taskContext ? { taskContext } : {}),
   })));
-  return { chunks, chunkAssignments, contextDocs, prompts, bounds };
+  return { chunks, chunkAssignments, contextDocs, prompts, bounds, taskContext };
 }
 
 async function executeCouncil(
@@ -2404,6 +2601,8 @@ async function executeCouncil(
     /** `--attest`: the run-bound credential and the run id it binds (RCL-40). */
     attestation?: Attestation;
     pendingResume?: PendingLegacyResumeExecution;
+    /** Journal of an ordinary guarded council (RCL-80), opened under the launch's ownership. */
+    ordinaryCheckpoint?: OrdinaryCheckpoint & { ownership: NativeTargetOwnership; plan: FrozenCheckpointPlan };
   },
   preparedWork?: Awaited<ReturnType<typeof prepareCouncilWork>>
 ): Promise<GuardedLaunchCompletion | undefined> {
@@ -2416,9 +2615,12 @@ async function executeCouncil(
       explicit: prepared.explicit, gating: prepared.gatingConfig });
     const guardedInput = {
       head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
+      ...(extra.target.baseSha === undefined ? {} : { base: extra.target.baseSha }),
       diff: diffDigest(diff.files), config: configDigest(config), roster, prompts,
       asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
     };
+    const { base: _base, ...historicalGuardedInput } = guardedInput;
+    const historicalInputSha256 = guardedInputSha256(historicalGuardedInput);
     const ordinaryAsyncDescriptors = chunks.flatMap(() => asyncAssignments.map(assignment => ({
       model: assignment.model, role: assignment.role.name, provider: assignment.provider,
     }))).slice(0, MAX_ASYNC_CALLS_PER_ROUND);
@@ -2426,11 +2628,32 @@ async function executeCouncil(
     const common = await resolveGitCommonDir();
     if (opts.exportPendingPackage) {
       const pendingNative = await loadConvergeRunState(common, prepared.converge!.target);
+      // Discovery only: export re-reads the native marker and authenticates its
+      // complete retained packet before producing anything. The caller can
+      // confirm this historical base, never nominate an unauthenticated one.
+      const original = pendingNative?.lastLaunch;
+      const retainedBase = original?.headSha === extra.target.headSha ? original?.ordinaryInputs?.baseSha : undefined;
+      const exportBaseSha = retainedBase === opts.expectBaseSha ? retainedBase : extra.target.baseSha;
+      // Only explicit historical export may reconstruct older input forms.
+      // New launches always hash a resolved base; older records may omit it or the
+      // shared task context. Retained receipts still check the base separately.
+      let exportInput = guardedInput;
+      if (pendingNative?.lastLaunch?.inputSha256 !== guardedInputSha256(guardedInput)) {
+        const candidates = [guardedInput, ...(exportBaseSha === undefined ? [] : [{ ...guardedInput, base: exportBaseSha }]), historicalGuardedInput];
+        if (work.taskContext) {
+          const earlierPrompts = await Promise.all(chunkAssignments.map(({ assignment, chunk }) =>
+            buildPrompt(chunk, assignment.role, { contextDocs, plan: planContext })));
+          candidates.push(...candidates.map(input => ({ ...input, prompts: earlierPrompts })));
+        }
+        exportInput = candidates.find(input =>
+          pendingNative?.lastLaunch?.inputSha256 === guardedInputSha256(input)) ?? guardedInput;
+      }
       const receipt = await exportOrdinaryPendingPackage({ gitCommonDir: common,
-        target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
+        target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: exportBaseSha ?? '',
         expectedBaseSha: opts.expectBaseSha!, expectedRound: prepared.converge!.round,
-        guardedInput, guardedInputCapacity: bounds.guardedInputCapacity, path: opts.exportPendingPackage,
-        preview: opts.previewPending === true, asyncStoreDir: await resolveExistingAsyncStoreDir(),
+        guardedInput: exportInput, guardedInputCapacity: bounds.guardedInputCapacity, path: opts.exportPendingPackage,
+        preview: opts.previewPending === true,
+        asyncStoreDir: await findExistingAsyncStoreDir(),
         asyncTargetKey: asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
           extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
           pendingNative?.cycle?.id),
@@ -2452,8 +2675,20 @@ async function executeCouncil(
       if (!extra.target.repo || !extra.target.prNumber) throw new Error('fresh_review_requires_pr');
       const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, config, noTelemetry: opts.telemetry === false });
       if (!runtime.sink || runtime.level !== 'full') throw new Error('Fresh review cycles require full Harness evidence and an actor credential');
+      const prTarget = parseGitHubTarget(`${extra.target.repo}#${extra.target.prNumber}`);
       cycleRemote = createReviewCycleRemote(runtime.sink, extra.target.repo, extra.target.prNumber,
-        opts.expectPrHeadSha ?? extra.target.headSha ?? '');
+        opts.expectPrHeadSha ?? extra.target.headSha ?? '', async () => {
+          // A parent with GitHub credentials hands the live state over, so this
+          // review process needs none (RCL-216).
+          if (opts.prSnapshot !== undefined) return readPrSnapshot(opts.prSnapshot, extra.target.repo!, extra.target.prNumber!);
+          const client = await createGitHubClient(config.githubToken);
+          const auth = await client.auth();
+          if (typeof auth !== 'object' || auth === null || !('type' in auth) || auth.type !== 'token') {
+            throw new Error('fresh_review_github_auth_unavailable');
+          }
+          const { data: pr } = await getGitHubPullRequest(client, prTarget);
+          return { headSha: pr.head.sha, merged: pr.merged, state: pr.state };
+        });
     }
     if (opts.resumePending || opts.finalizePendingOnly) {
       const asyncBinding = opts.resumeAsyncSha256!.trim();
@@ -2461,7 +2696,7 @@ async function executeCouncil(
         ? [] : asyncBinding.split(',').map(value => value.trim());
       if (expectedAsyncSha256.some(value => !/^[a-f0-9]{64}$/.test(value))) {
         throw new ReviewLaunchRefused('pending_async_binding_invalid',
-          'Retained async bindings must be comma-separated lowercase SHA-256 digests, or "none" for an empty cycle history.');
+          'Retained async bindings must be comma-separated lowercase SHA-256 digests, or "none" when nothing was retained.');
       }
       const migrationPackageBytes = opts.ordinaryPendingPackage === undefined ? undefined
         : (await readStable(opts.ordinaryPendingPackage, MAX_ORDINARY_PENDING_PACKAGE_BYTES)).text;
@@ -2473,6 +2708,14 @@ async function executeCouncil(
       }
       const migrationGuardedInput = migrationPackage
         ? ordinaryPendingGuardedInput(migrationPackage) : undefined;
+      // Only finalize-only may authenticate the old PR base rather than the
+      // current comparison. Never feed that base into a successor's capture.
+      // Advanced receipt replay remains available via an explicitly bound patch.
+      const retainedBase = native?.lastLaunch?.headSha === extra.target.headSha
+        ? native?.lastLaunch?.ordinaryInputs?.baseSha : undefined;
+      const finalizationBaseSha = opts.finalizePendingOnly && extra.target.kind === 'pr' &&
+        retainedBase !== undefined && retainedBase === migrationPackage?.baseSha
+        ? retainedBase : extra.target.baseSha ?? '';
       if (opts.expectPrHeadSha !== undefined && migrationPackage?.version !== 2) {
         throw new ReviewLaunchRefused('pending_finalize_incompatible',
           '--expect-pr-head-sha requires a cycle-backed version-2 pending package.');
@@ -2481,10 +2724,12 @@ async function executeCouncil(
         throw new ReviewLaunchRefused('pending_finalize_incompatible',
           '--for-pr finalize-only recovery requires a cycle-backed version-2 pending package.');
       }
-      if (migrationPackage?.version !== 2 && (expectedAsyncSha256.length === 0 ||
+      // Only a package whose council had no async seats retains nothing.
+      if (migrationPackage?.version !== 2 && ((expectedAsyncSha256.length === 0 &&
+          !(migrationGuardedInput && guardedInputWithoutAsyncSeats(migrationGuardedInput))) ||
           new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length)) {
         throw new ReviewLaunchRefused('pending_async_binding_invalid',
-          'Ordinary retained async SHA-256 bindings must be non-empty and unique.');
+          'Ordinary retained async SHA-256 bindings must be unique, and non-empty unless the package\'s council had no async seats.');
       }
       if (migrationPackage?.version === 2 && opts.resumePending) {
         throw new ReviewLaunchRefused('cycle_pending_finalize_only',
@@ -2492,6 +2737,8 @@ async function executeCouncil(
       }
       const loadMigrationRetainedAsync = async (): Promise<AsyncResultReference[]> => {
         if (!migrationPackage) throw new ReviewLaunchRefused('pending_async_missing', 'An ordinary package is required.');
+        // Nothing to load: package validation refuses an empty list unless its council had no async seats.
+        if (migrationPackage.version !== 2 && migrationPackage.retainedAsync.length === 0) return [];
         const store = await resolveExistingAsyncStoreDir();
         if (migrationPackage.version === 2) {
           const key = asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
@@ -2519,10 +2766,10 @@ async function executeCouncil(
         if (found.size !== wanted.size) throw new ReviewLaunchRefused('pending_async_missing', 'A package-bound retained async artifact is unavailable.');
         return [...found.values()].sort((a, b) => a.sha256.localeCompare(b.sha256));
       };
-      if (opts.previewPending && migrationPackage) {
+      if (opts.previewPending && migrationPackage && !(opts.resumePending && native?.lastLaunch?.pendingResume)) {
         const inputSha256 = guardedInputSha256(migrationGuardedInput!);
         const preview = await previewOrdinaryPendingLaunch({ gitCommonDir: common,
-          target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
+          target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: finalizationBaseSha,
           pendingInputSha256: inputSha256, recoveryInputSha256: inputSha256,
           retryReason: opts.retryReason ?? 'Finalize-only authentication preview.',
           captured: {} as CapturedPreparedCouncil, retainedAsyncSha256: expectedAsyncSha256,
@@ -2540,7 +2787,7 @@ async function executeCouncil(
         const inputSha256 = guardedInputSha256(migrationGuardedInput!);
         const result = await finalizeOrdinaryPendingLaunch({ gitCommonDir: common,
           target: prepared.converge!.target, headSha: extra.target.headSha ?? '',
-          baseSha: extra.target.baseSha ?? '', pendingInputSha256: inputSha256,
+          baseSha: finalizationBaseSha, pendingInputSha256: inputSha256,
           nativeStateSha256: opts.pendingNativeSha256!, attemptStateSha256: opts.pendingAttemptSha256!,
           retainedAsyncSha256: expectedAsyncSha256, migrationPackage,
           maxAttempts: Number(opts.maxAttempts), cycleRemote,
@@ -2602,7 +2849,8 @@ async function executeCouncil(
       };
       const aggregationInputs = captureAggregationInputs({ algorithm: AGGREGATION_ALGORITHM,
         diffSha256: diffDigest(diff.files), roleMap, thresholds, gating: prepared.gatingConfig,
-        belowThresholdAppendix: config.output?.belowThresholdAppendix ?? true });
+        belowThresholdAppendix: config.output?.belowThresholdAppendix ?? true,
+        ...(work.taskContext ? { taskContext: work.taskContext } : {}) });
       const captured = capturePreparedCouncil({ target: prepared.converge!.target,
         headSha: extra.target.headSha ?? '', mergeBaseSha: extra.target.baseSha ?? '', diff,
         assignments,
@@ -2622,15 +2870,12 @@ async function executeCouncil(
       const asyncStoreDir = await resolveAsyncStoreDir();
       const asyncKey = asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
         extra.target.kind === 'patch' ? prepared.converge!.target : undefined, prepared.converge!.cycleId);
-      const recoveryInputSha256 = sha256Hex(stableStringify({
-        head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo,
-        pr: extra.target.prNumber, diff: diffDigest(diff.files), config: configDigest(config),
-        roster, prompts, asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
-      }));
+      const recoveryInputSha256 = guardedInputSha256(guardedInput);
       const pendingResumeOptions: PendingLegacyResumeOptions = { gitCommonDir: common,
         target: prepared.converge!.target, headSha: extra.target.headSha ?? '',
         baseSha: extra.target.baseSha ?? '',
         pendingInputSha256: claimedInputSha256, recoveryInputSha256,
+        historicalRecoveryInputSha256: historicalInputSha256,
         retryReason: opts.retryReason!,
         ...(opts.retryReport ? { legacyRetry: { reportPath: opts.retryReport, config, roster,
           historicalPlan: prepared.historicalRetryPlan === true } } : {}),
@@ -2643,7 +2888,10 @@ async function executeCouncil(
           (config.timeout ?? DEFAULT_TIMEOUT_MS) * Math.max(1, Math.ceil(captured.plan.cells.length / (config.concurrency ?? DEFAULT_CONCURRENCY))) *
           ((config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1) +
           prepared.gatingConfig.verificationTimeoutMs),
-        validate: async () => { validateLaunchProviders(roster.map(entry => entry.provider)); await validateLaunchOutputs(opts); },
+        validate: async () => {
+          validateLaunchProviders(roster.map(entry => entry.provider), process.env, prepared.keyFetchFailure);
+          await validateLaunchOutputs(opts);
+        },
         loadRetainedAsync: migrationPackage ? loadMigrationRetainedAsync : async () => {
           const snapshot = await snapshotAsyncResults(asyncStoreDir, asyncKey,
             pendingClaimPlan.assignments.map(assignment => ({
@@ -2691,14 +2939,40 @@ async function executeCouncil(
       }
       return result.completion;
     }
+    // Journal the ordinary council so an interrupted process resumes without
+    // repeating successful calls (RCL-80). Without an exact head and base, or
+    // inputs beyond the capture limits, dispatch stays unjournaled.
+    let ordinaryPlan: FrozenCheckpointPlan | undefined;
+    if (/^[a-f0-9]{40}$/.test(extra.target.headSha ?? '') && /^[a-f0-9]{40}$/.test(extra.target.baseSha ?? '')) {
+      try {
+        ordinaryPlan = capturePreparedCouncil({ target: prepared.converge!.target,
+          headSha: extra.target.headSha!, mergeBaseSha: extra.target.baseSha!, diff, assignments,
+          lanes: assignments.map(item => assignmentLane(item.model, prepared.coreModels, prepared.explicit)),
+          chunks, prompts, config, specBytes: prepared.specContent ?? '', contextDocs,
+          compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: AGGREGATION_ALGORITHM } }).plan;
+      } catch (error) {
+        process.stderr.write(`Council journal unavailable (${scrubText(String(error), 200)}); an interrupted run cannot resume.\n`);
+      }
+    }
+    const journalPlan = ordinaryPlan;
+    if (opts.maxSliceMinutes !== undefined && !journalPlan) {
+      throw new ReviewLaunchRefused('slice_budget_unavailable',
+        '--max-slice-minutes needs a journaled council (an exact head and base within the capture limits); rerun without it.');
+    }
     const claim = await guardReviewLaunch({
+      ...(opts.launchOwnership ? { ownership: opts.launchOwnership } : {}),
       gitCommonDir: await resolveGitCommonDir(),
       target: prepared.converge!.target,
       startOver: opts.startOver, cycleRemote,
+      ...(journalPlan ? { ordinaryCheckpoint: { exists: async (namespace: string) => {
+        try { return !!await CheckpointJournal.openRead(checkpointPath(common, prepared.converge!.target, namespace), journalPlan); }
+        catch { return false; }
+      } } } : {}),
       boundFixRecovery,
       recoverySource: prepared.converge!.recovery_source,
       headSha: extra.target.headSha ?? '',
       inputSha256: guardedInputSha256(guardedInput),
+      historicalInputSha256,
       round: prepared.converge!.round,
       intent: opts.launchIntent,
       retryReason: opts.retryReason,
@@ -2708,7 +2982,7 @@ async function executeCouncil(
       consumeAttempt: prepared.recoveredProduction ? prepared.converge!.attempt : undefined,
       maxRounds: opts.maxRounds === undefined ? undefined : Number(opts.maxRounds),
       validate: async () => {
-        validateLaunchProviders(roster.map(entry => entry.provider));
+        validateLaunchProviders(roster.map(entry => entry.provider), process.env, prepared.keyFetchFailure);
         if (assignments.length < 2) {
           throw new ReviewLaunchRefused('insufficient_reviewers', 'Convergence needs at least two reviewer assignments for a conclusive round.');
         }
@@ -2734,9 +3008,11 @@ async function executeCouncil(
         process.stderr.write(`Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}.\n`);
         if (boundFixRecovery) process.stderr.write(`Bound fix recovery verified from run ${boundFixRecovery.runId}; attempt ${claim.attempt} retains the existing review history.\n`);
       },
-      run: async converge => {
+      run: async (converge, ownership, _original, checkpoint) => {
+        if (checkpoint?.resumed) process.stderr.write(`Resuming the interrupted council of attempt ${converge.attempt}; journaled calls are not repeated.\n`);
         const guardedCompletion = await executeCouncil(spinner, { ...prepared, converge }, diff,
-          { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work);
+          { ...opts, guardedConverge: false, exclusiveOutputs: true },
+          { ...extra, ...(checkpoint && journalPlan ? { ordinaryCheckpoint: { ...checkpoint, ownership, plan: journalPlan } } : {}) }, work);
         if (!guardedCompletion) throw new Error('guarded_launch_missing_completion');
         completion = guardedCompletion;
         return guardedCompletion;
@@ -2760,7 +3036,7 @@ async function executeCouncil(
   let asyncKey: string | undefined;
   let asyncLaunched = 0;
   if (
-    !extra.pendingResume &&
+    !extra.pendingResume && !extra.ordinaryCheckpoint?.resumed &&
     asyncTargetLabel !== undefined &&
     (asyncAssignments.length > 0 || (config.asyncModels?.length ?? 0) > 0)
   ) {
@@ -2787,6 +3063,7 @@ async function executeCouncil(
             buildPrompt(chunk, assignment.role, {
               contextDocs,
               plan: planContext,
+              ...(work.taskContext ? { taskContext: work.taskContext } : {}),
             })
           )
         );
@@ -2858,11 +3135,15 @@ async function executeCouncil(
       process.stderr.write(`${text}\n`);
     },
   });
-  progress.start();
-
+  // A host may die after retaining the terminal pair but before publishing
+  // native completion. Preserve that report instead of assembling new bytes.
+  const retainedPending = extra.pendingResume
+    ? await readPendingTerminalReport(extra.pendingResume.journal, extra.pendingResume.launch) : undefined;
+  const retainedPendingTerminal = retainedPending?.terminal;
   let chunkReviews: ModelReview[];
   let pendingProjection: ReturnType<typeof projectCheckpointReport> | undefined;
   let pendingAsyncExecution: SealedAsyncProof | undefined;
+  progress.start();
   try {
     if (extra.pendingResume) {
       if (!(await extra.pendingResume.journal.read()).finalized) {
@@ -2883,10 +3164,8 @@ async function executeCouncil(
         successor: { runId: extra.pendingResume.launch.runId, proof },
         policy: { version: 1 as const, fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION } });
       chunkReviews = pendingProjection.seatReviews.map(seat => structuredClone(seat.review));
-    } else chunkReviews = await runReviews(
-      chunkAssignments.map((ca) => ca.assignment),
-      prompts,
-      {
+    } else {
+      const ordinaryRunner = {
         // Fall back to the shared constants, never to inline literals:
         // duplicated defaults drift (this read 120_000 after the default
         // moved to 600_000).
@@ -2907,9 +3186,24 @@ async function executeCouncil(
           blocking: chunkAssignments.map((ca) =>
             assignmentLane(ca.assignment.model, prepared.coreModels, prepared.explicit) === 'blocking'),
         },
-        onReviewComplete: (review) => progress.complete(review),
-      }
-    );
+        onReviewComplete: (review: ModelReview) => progress.complete(review),
+      };
+      const checkpoint = extra.ordinaryCheckpoint;
+      if (checkpoint) {
+        const open = { commonDir: await resolveGitCommonDir(), namespace: checkpoint.namespace,
+          plan: checkpoint.plan, ownership: checkpoint.ownership };
+        const journal = await (checkpoint.resumed ? CheckpointJournal.openWrite(open) : CheckpointJournal.create(open));
+        const sliceEndsAt = opts.maxSliceMinutes === undefined ? undefined : Date.now() + Number(opts.maxSliceMinutes) * 60_000;
+        const journaled = await runJournaledCouncil({ journal, ownership: checkpoint.ownership,
+          assignments: chunkAssignments.map((ca) => ca.assignment), prompts, runner: ordinaryRunner,
+          ...(sliceEndsAt === undefined ? {} : { admit: () => Date.now() < sliceEndsAt }) });
+        if (journaled.retained > 0) process.stderr.write(`Reused ${journaled.retained} journaled call(s) from the interrupted council.\n`);
+        if (journaled.interrupted) {
+          throw new ReviewCouncilInterrupted(journaled.reviews.filter(review => review.status !== 'canceled').length, totalCalls);
+        }
+        chunkReviews = journaled.reviews;
+      } else chunkReviews = await runReviews(chunkAssignments.map((ca) => ca.assignment), prompts, ordinaryRunner);
+    }
   } finally {
     progress.stop();
   }
@@ -2957,7 +3251,7 @@ async function executeCouncil(
   // stats store must never break a review).
   try {
     const ts = new Date().toISOString();
-    await appendCalls(
+    if (!retainedPendingTerminal) await appendCalls(
       [...chunkReviews, ...arrivedAsync].map((r) => ({
         ts,
         model: r.model,
@@ -2985,7 +3279,8 @@ async function executeCouncil(
   // weights read, then delivery — the credential is renewed for the same run
   // id when little of it remains (RCL-40).
   let attestation = extra.attestation;
-  if (attestation) {
+  const renewAttestationForDelivery = async (): Promise<void> => {
+    if (!attestation) return;
     const renewal = await renewAttestation(attestation, { rclVersion: RCL_VERSION });
     attestation = renewal.attestation;
     if (renewal.renewed) {
@@ -2993,7 +3288,8 @@ async function executeCouncil(
     } else if (renewal.failure !== undefined) {
       process.stderr.write(chalk.dim(`Attestation not renewed (${renewal.failure}); continuing with the credential in hand`) + '\n');
     }
-  }
+  };
+  await renewAttestationForDelivery();
 
   let modelWeights: Map<string, number> | undefined;
   try {
@@ -3039,7 +3335,7 @@ async function executeCouncil(
     } satisfies CompletedReviewInput['run'];
   const assemblyDependencies: Parameters<typeof assembleCompletedReview>[1] = {
     onStage: postReviewStage,
-    onVerificationStart: () => { spinner.text = 'Verifying single-model findings...'; },
+    onVerificationStart: () => { spinner.text = 'Verifying blocking findings...'; },
     onVerificationProgress: (event) => {
       const line =
         `Verification ${event.completedBatches}/${event.totalBatches} batches ` +
@@ -3064,7 +3360,9 @@ async function executeCouncil(
     assembly: CheckpointAssemblyInput;
     verificationProof?: SealedVerificationProof;
   } | undefined;
-  if (extra.pendingResume) {
+  if (retainedPendingTerminal) {
+    result = JSON.parse(retainedPendingTerminal.reportBytes) as Awaited<ReturnType<typeof assembleCompletedReview>>;
+  } else if (extra.pendingResume) {
     const proof = await exportCheckpointProof(extra.pendingResume.journal);
     const supplementalBytes = (await extra.pendingResume.journal.readBindings())['supplemental-async'];
     if (supplementalBytes === undefined) throw new Error('pending_legacy_resume_async_binding_missing');
@@ -3096,6 +3394,7 @@ async function executeCouncil(
   } else result = await assembleCompletedReview({
     chunkReviews, arrivedAsync, asyncLaunched, startTime, roleMap, config, diff,
     gatingConfig: prepared.gatingConfig, recoveredProduction: prepared.recoveredProduction, modelWeights, run: runInput,
+    ...(work.taskContext ? { taskContext: work.taskContext } : {}),
   }, assemblyDependencies);
   const { run } = result;
   // The same derivation converge-report and the server apply to this report.
@@ -3142,6 +3441,9 @@ async function executeCouncil(
   // turn a finished review into a failure unless --evidence-required asks.
   let runtime: TelemetryRuntime | undefined;
   let runtimeError: string | undefined;
+  // A verification pass scaled to a large review (RCL-206) can outlast the
+  // credential renewed before it, so renew again just before delivery.
+  await renewAttestationForDelivery();
   try {
     runtime = await createTelemetryRuntime({
       rclVersion: RCL_VERSION,
@@ -3160,12 +3462,13 @@ async function executeCouncil(
   // declared digests match the files and nothing raw travels. With
   // telemetry off only fresh prose normalization applies. This is the fresh
   // producer boundary; retained reports and envelope builders never rewrite it.
-  const produced = normalizeGeneratedReport(result);
-  const delivered =
-    runtime && runtime.level !== 'off' ? sanitizeForDelivery(produced, { parseFailures: runtime.parseFailures }) : produced;
+  const produced = retainedPendingTerminal ? result : normalizeGeneratedReport(result);
+  const delivered = !retainedPendingTerminal && runtime && runtime.level !== 'off'
+    ? sanitizeForDelivery(produced, { parseFailures: runtime.parseFailures }) : produced;
   postReviewStage('rendering report artifacts');
-  const artifacts = renderReportArtifacts(delivered);
-  let pendingReviewerArtifact: ReturnType<typeof serializeReviewerArtifact> | undefined;
+  const artifacts = { ...renderReportArtifacts(delivered),
+    ...(retainedPendingTerminal ? { report_json: retainedPendingTerminal.reportBytes } : {}) };
+  let pendingReviewerArtifact: ReturnType<typeof serializeReviewerArtifact> | undefined = retainedPending?.artifact;
   if (extra.pendingResume && pendingEvidence) {
     pendingReviewerArtifact = serializeReviewerArtifact({
       assembly: pendingEvidence.assembly,
@@ -3419,4 +3722,5 @@ async function runPlanReview(
   }
 }
 
+installHttp1Transport();
 program.parse();

@@ -74,6 +74,17 @@ describe('ordinary pending migration package', () => {
     expect((restored.input.prompts as typeof expanded.prompts)[128]!.userPrompt).toBe(prompt.userPrompt);
   }, 30_000);
 
+  it('authenticates a new base-bound input while still accepting historical packets (RCL-210)', () => {
+    expect(validateOrdinaryPendingPackage(packet(), expected)).toBeDefined();
+    const guardedInput = { ...input, base: expected.baseSha };
+    const value = { ...packet(), guardedInput };
+    const identity = { ...expected, inputSha256: guardedInputSha256(guardedInput) };
+    expect(validateOrdinaryPendingPackage(value, identity)).toBeDefined();
+    const changed = { ...guardedInput, base: 'f'.repeat(40) };
+    expect(() => validateOrdinaryPendingPackage({ ...value, guardedInput: changed },
+      { ...identity, inputSha256: guardedInputSha256(changed) })).toThrow('ordinary_pending_package_mismatch');
+  });
+
   it('requires an explicit representation contract for compact guarded input while accepting legacy raw input', () => {
     expect(validateOrdinaryPendingPackage(packet(), expected)).toBeDefined();
 
@@ -243,5 +254,25 @@ describe('ordinary pending migration package', () => {
   ])('refuses %s retained async descriptor', (_label, mutate) => {
     const changed = packet(); mutate(changed);
     expect(() => validateOrdinaryPendingPackage(changed, expected)).toThrow('ordinary_pending_package_mismatch');
+  });
+  it('accepts no retained async results only when the original council had no async seats', () => {
+    const zeroAsync = { ...structuredClone(input), asyncRoles: [], roster: [
+      { model: 'openai/test', role: 'bug-hunter', provider: 'openai', lane: 'blocking' },
+      { model: 'openai/verify', role: 'verification', provider: 'openai', lane: 'verification' }] };
+    const empty = (guardedInput: Record<string, unknown>) => ({
+      value: { ...packet(), retainedAsyncSha256: [] as string[], retainedAsync: [], guardedInput: structuredClone(guardedInput) },
+      identity: { ...expected, retainedAsyncSha256: [] as string[], inputSha256: guardedInputSha256(guardedInput) },
+    });
+    const accepted = empty(zeroAsync);
+    expect(validateOrdinaryPendingPackage(accepted.value, accepted.identity))
+      .toMatchObject({ retainedAsyncSha256: [], retainedAsync: [] });
+
+    const asyncSeat = { ...zeroAsync, roster: [...zeroAsync.roster,
+      { model: 'openai/async', role: 'general', provider: 'openai', lane: 'async' }] };
+    for (const guardedInput of [asyncSeat, { ...zeroAsync, asyncRoles: [{ name: 'general' }] }]) {
+      const refused = empty(guardedInput);
+      expect(() => validateOrdinaryPendingPackage(refused.value, refused.identity))
+        .toThrow('ordinary_pending_package_mismatch');
+    }
   });
 });

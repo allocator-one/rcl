@@ -3,8 +3,9 @@ import { join } from 'path';
 import { SEARCH_PLACES } from '../config/loader.js';
 import { HarnessSchema, type Config } from '../config/schema.js';
 import type { ReviewResult } from '../consensus/types.js';
+import { declaresStrictFallback, strictFallbackProblem } from '../consensus/strict-fallback.js';
 import { resolveDataDir } from '../config/data-dir.js';
-import { credentialHost, resolveHarnessCredential, type HarnessCredential } from './credentials.js';
+import { credentialHost, resolveHarnessCredential, type CredentialResolution, type HarnessCredential } from './credentials.js';
 import { declareReviewerRecovery, type ReviewerRecoverySource, buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type RunEnvelope, type TelemetryLevel } from './envelope.js';
 import { validateRunEnvelope, type EvidenceDiagnostic } from './envelope-validation.js';
 import { Quarantine, QUARANTINE_DIR, type RetentionOutcome } from './quarantine.js';
@@ -15,7 +16,7 @@ import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink, validateEnvelopeTimeoutMs, type RunReceipt, type SinkOutcome } from './sink.js';
 import { isReviewerArtifact, type ReviewerArtifact } from '../report/reviewer-artifact.js';
 import { sha256Hex } from '../report/run-header.js';
-import { ReviewerDeliveryQueue, type RetainedReviewerRecoverySelection } from './reviewer-delivery.js';
+import { ReviewerDeliveryQueue } from './reviewer-delivery.js';
 import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
 import { verifiedConsensusReportProblem } from './report-consistency.js';
 import { AttestedReviewerDelivery } from './attested-reviewer-delivery.js';
@@ -32,6 +33,7 @@ import { AttestedReviewerDelivery } from './attested-reviewer-delivery.js';
 
 export const STARTUP_FLUSH_DEADLINE_MS = 5_000;
 export const EVIDENCE_REQUIRED_EXIT_CODE = 4;
+const WIRE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface TelemetryRuntime {
   level: TelemetryLevel;
@@ -39,6 +41,8 @@ export interface TelemetryRuntime {
   repoManaged: boolean;
   parseFailures: boolean;
   credential?: HarnessCredential;
+  /** The credential file (null when none) and why it was chosen; never the token. */
+  credentialOrigin?: CredentialResolution['origin'];
   /**
    * The credential is the run-bound one of `--attest` (RCL-40): it does not
    * outlive the workflow run, so nothing recorded under it is spooled.
@@ -199,6 +203,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
   if (resolved.note !== undefined) runtime.note = resolved.note;
   if (resolved.credential) {
     runtime.credential = resolved.credential;
+    if (resolved.origin) runtime.credentialOrigin = resolved.origin;
     runtime.sink = new HarnessSink({
       credential: resolved.credential,
       rclVersion: options.rclVersion,
@@ -219,7 +224,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
 // Persistence failures are absorbed inside `ensureNoticeShown` (shown, not
 // recorded — it shows again next time); anything that escapes means the
 // notice itself could not be written, and nothing is transmitted then.
-async function noticeBefore(runtime: TelemetryRuntime, scope: NoticeScope = 'ordinary'): Promise<void> {
+export async function noticeBefore(runtime: TelemetryRuntime, scope: NoticeScope = 'ordinary'): Promise<void> {
   if (!runtime.credential) return;
   await ensureNoticeShown(credentialHost(runtime.credential), runtime.dataDir, runtime.stderr, scope);
 }
@@ -227,49 +232,61 @@ async function noticeBefore(runtime: TelemetryRuntime, scope: NoticeScope = 'ord
 /** Flush the outbox through the runtime's sink, the notice shown first. */
 export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptions = {}): Promise<FlushSummary> {
   if (!runtime.sink) throw new Error('No Harness credential to flush with.');
-  await noticeBefore(runtime);
+  const reviewerQueue = new ReviewerDeliveryQueue(runtime.dataDir);
   const started = performance.now();
-  const ordinary = await runtime.outbox.flush(runtime.sink, options);
+  const transferBoundary = async <T>(work: () => Promise<T>) => {
+    await noticeBefore(runtime);
+    return work();
+  };
+  const refusalReason = options.runId === undefined ? (error: unknown): string | undefined => {
+    if (!(error instanceof Error)) return undefined;
+    if (error.message === 'reviewer_delivery_explicit_activation_required' ||
+        error.message === 'reviewer_delivery_invalid_event_run_id') return error.message;
+    if (error.message === 'recovery_run_locked') return 'reviewer_delivery_recovery_run_locked';
+    return undefined;
+  } : undefined;
+  const eventRunIds = (event: WireEvent): string[] => {
+    const payloadRunId = event.kind === 'loss' && event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+      ? event.payload['run_id'] : undefined;
+    const bindings = [event.run_id, typeof payloadRunId === 'string' ? payloadRunId : undefined]
+      .filter((runId): runId is string => runId !== undefined);
+    if (bindings.some(runId => !WIRE_RUN_ID.test(runId))) throw new Error('reviewer_delivery_invalid_event_run_id');
+    return [...new Set(bindings.map(runId => runId.toLowerCase()))].sort();
+  };
+  const eventBoundary = async <T>(event: WireEvent, entry: { id: string; meta: { kind: 'run' | 'events' } } | undefined,
+    work: () => Promise<T>): Promise<T> => {
+    const runIds = eventRunIds(event).filter(runId => entry?.meta.kind !== 'run' || runId.toLowerCase() !== entry.id.toLowerCase());
+    const acquire = (index: number): Promise<T> => index === runIds.length
+      ? transferBoundary(work)
+      : reviewerQueue.withGenericDeliveryAllowed(runIds[index]!, () => acquire(index + 1));
+    return acquire(0);
+  };
+  const ordinary = await runtime.outbox.flush(runtime.sink, {
+    ...options,
+    entryBoundary: (entry, work) => entry.meta.kind === 'run'
+      ? reviewerQueue.withGenericDeliveryAllowed(entry.id, () => transferBoundary(work))
+      : work(),
+    eventBoundary,
+    ...(refusalReason ? { entryRefusalReason: refusalReason } : {}),
+  });
   if (runtime.level !== 'full' || runtime.attested) return ordinary;
   const remaining = options.deadlineMs === undefined ? undefined : Math.max(0, options.deadlineMs - (performance.now() - started));
-  const privateResult = await new ReviewerDeliveryQueue(runtime.dataDir).flush(
+  const privateResult = await reviewerQueue.flush(
     runtime.sink,
     { ...options, deadlineMs: remaining },
     () => noticeBefore(runtime, 'private-reviewers'),
   );
-  return { ...ordinary, delivered: [...ordinary.delivered, ...privateResult.delivered], remaining: [...ordinary.remaining, ...privateResult.remaining],
-    failed: [...ordinary.failed, ...privateResult.failed], dropped: [...ordinary.dropped, ...privateResult.dropped],
+  const failed: FlushSummary['failed'] = [];
+  const seenFailures = new Set<string>();
+  for (const row of [...ordinary.failed, ...privateResult.failed]) {
+    const key = JSON.stringify([row.id, row.reason]);
+    if (seenFailures.has(key)) continue;
+    seenFailures.add(key);
+    failed.push(row);
+  }
+  return { ...ordinary, delivered: [...ordinary.delivered, ...privateResult.delivered], remaining: [...new Set([...ordinary.remaining, ...privateResult.remaining])],
+    failed, dropped: [...ordinary.dropped, ...privateResult.dropped],
     ...(ordinary.stopped || privateResult.stopped ? { stopped: ordinary.stopped ?? privateResult.stopped } : {}) };
-}
-
-/**
- * Explicit lineage-authenticated activation of one exact retained reviewer
- * outbox. This is deliberately separate from generic telemetry flush.
- */
-export async function activateRetainedReviewerRun(
-  runtime: TelemetryRuntime,
-  selection: RetainedReviewerRecoverySelection,
-): Promise<DeliveryOutcome> {
-  const finish = (status: DeliveryStatus, spooled: boolean, line: string): DeliveryOutcome => ({
-    status, spooled, line, runId: selection.runId, exitCode: exitFor(status, true),
-  });
-  if (runtime.level !== 'full' || !runtime.repoManaged || !runtime.sink || !runtime.credential || runtime.attested) {
-    return finish('rejected', false,
-      'Retained reviewer activation requires full telemetry and a supported current owner credential');
-  }
-  const queue = new ReviewerDeliveryQueue(runtime.dataDir);
-  try {
-    const preview = await queue.previewRecovery(selection);
-    await noticeBefore(runtime, 'private-reviewers');
-    await queue.applyRecovery(runtime.sink, selection, preview);
-    return finish('recorded', false,
-      'Retained reviewer envelope, ordinary reports and private evidence recorded and read back; no native admission implied');
-  } catch {
-    const retained = await queue.isRetained(selection.runId);
-    return finish(retained ? 'spooled' : 'rejected', retained,
-      retained ? 'Retained reviewer activation incomplete; exact bytes remain queued for the explicit recovery command' :
-        'Retained reviewer activation refused locally; original checkpoint evidence is unchanged');
-  }
 }
 
 /** Bounded: an offline machine must never stall a command. Fail-soft. */
@@ -344,7 +361,10 @@ function localFailure(err: unknown): string {
 
 /** The wire builder defaults an absent finding label to `none`; inspect the immutable report first. */
 export function verifiedConsensusDiagnostics(result: ReviewResult): EvidenceDiagnostic[] {
-  if (result.run?.gating?.mode !== 'verified-consensus') return [];
+  // A declared strict fallback is checked exactly; `strict_fallback` is no label without it.
+  const fallbackProblem = strictFallbackProblem(result);
+  if (fallbackProblem) return [{ path: 'run.gating.strict_fallback', message: fallbackProblem }];
+  if (result.run?.gating?.mode !== 'verified-consensus' || declaresStrictFallback(result.run.gating)) return [];
   const diagnostics: EvidenceDiagnostic[] = [];
   const reasons = new Set(['consensus', 'critical', 'verified', 'none']);
   let hasVerificationEvidence = false;
@@ -365,6 +385,14 @@ export function verifiedConsensusDiagnostics(result: ReviewResult): EvidenceDiag
   return diagnostics.slice(0, 20);
 }
 
+/**
+ * Harness counts a strict fallback only once it holds the run's report_json,
+ * which only telemetry level `full` sends.
+ */
+export function strictFallbackLevelDiagnostic(level: TelemetryLevel): EvidenceDiagnostic {
+  return { path: 'telemetry', message: `A strict fallback counts only with its report_json, which telemetry level ${level} never sends; deliver it at telemetry level full` };
+}
+
 /** Only a proof-derived private artifact may explain intentionally unlabeled strict-fallback bytes. */
 function authenticatedStrictFallback(input: DeliverRunInput): boolean {
   const artifact = input.reviewerArtifact, gate = artifact?.validation.gate;
@@ -378,7 +406,7 @@ function authenticatedStrictFallback(input: DeliverRunInput): boolean {
     .every(finding => finding.gating === undefined);
 }
 
-function verifiedConsensusEnvelopeDiagnostics(
+export function verifiedConsensusEnvelopeDiagnostics(
   input: DeliverRunInput,
   envelope: RunEnvelope,
 ): EvidenceDiagnostic[] {
@@ -456,12 +484,13 @@ async function deliverReviewerRun(runtime: TelemetryRuntime, input: DeliverRunIn
   }
   const queue = new ReviewerDeliveryQueue(runtime.dataDir);
   try {
-    await noticeBefore(runtime, 'private-reviewers');
     if (runtime.attested) {
+      await noticeBefore(runtime, 'private-reviewers');
       await input.attestedReviewer!.deliver({ envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact });
       return finish('recorded', false, 'Private evidence and embedded JSON read back; ordinary artifact PUT receipts verified; no native admission implied');
     }
-    await queue.deliver({ sink: runtime.sink, envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact });
+    await queue.deliver({ sink: runtime.sink, envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact }, {},
+      () => noticeBefore(runtime, 'private-reviewers'));
     return finish('recorded', false, 'Reviewer evidence and ordinary reports recorded and read back; no native admission implied');
   } catch {
     if (runtime.attested) return finish('rejected', false,
@@ -506,6 +535,8 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   }
   const diagnostics = validateRunEnvelope(envelope, input.artifacts);
   diagnostics.push(...verifiedConsensusEnvelopeDiagnostics(input, envelope));
+  const strictFallback = declaresStrictFallback(input.result.run?.gating);
+  if (strictFallback && runtime.level !== 'full') diagnostics.push(strictFallbackLevelDiagnostic(runtime.level));
   if (diagnostics.length > 0) {
     const retention = await retainRun(runtime, input, envelope, diagnostics);
     return { status: 'rejected', runId, spooled: false, failureDisposition: 'local-invalid', retention, exitCode: exitFor('rejected', evidenceRequired),
@@ -529,11 +560,12 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
     }
     const retention = await retainRun(runtime, input, envelope, [{ path: 'delivery', message: reason }]);
     try {
-      await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
+      const spooled = await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
+      const dropped = spooled.artifactsDropped.length > 0 ? ` (${spooled.artifactsDropped.join(', ')} not spooled: outbox over its cap)` : '';
       return {
         status: 'spooled',
         retention,
-        line: `Evidence spooled (${reason}); run rcl telemetry flush once a credential is available; ${retentionLine(retention, runId)}`,
+        line: `Evidence spooled (${reason})${dropped}; run rcl telemetry flush once a credential is available; ${retentionLine(retention, runId)}`,
         runId,
         spooled: true,
         exitCode: EVIDENCE_REQUIRED_EXIT_CODE,
@@ -676,7 +708,9 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
     const outcome = await runtime.sink.putArtifact(runId, kind, bytes);
     if (outcome.kind === 'ok') continue;
     if (outcome.kind === 'disabled') {
-      notes.push('artifacts capped by the organization');
+      notes.push(strictFallback && kind === 'report_json'
+        ? 'artifacts capped by the organization; the strict fallback counts only with its report_json'
+        : 'artifacts capped by the organization');
       artifactsRefused += 1;
       break;
     }

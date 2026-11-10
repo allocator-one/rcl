@@ -75,7 +75,7 @@ const finding = z.object({
   claim_descriptor: claimDescriptorSchema.optional(),
   severity: z.enum(['critical', 'important', 'minor', 'nitpick']), category: text(64, true),
   title: short, description: optional(text(20_000)), suggested_fix: optional(text(20_000)),
-  consensus: optional(map), gating_reason: z.enum(['consensus', 'critical', 'verified', 'none']),
+  consensus: optional(map), gating_reason: z.enum(['consensus', 'critical', 'verified', 'strict_fallback', 'none']),
   verification_verdict: optional(text(32)), verification_model: optional(text(MAX_RETAINED_DIAGNOSTIC_CHARS)), verification_note: optional(text(MAX_RETAINED_DIAGNOSTIC_CHARS)),
   below_threshold: z.boolean(),
 }).passthrough().superRefine((v, ctx) => {

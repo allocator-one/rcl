@@ -1,6 +1,7 @@
 import { recoverySourceSchema } from '../../report/recovery-source.js';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
+import { declaresStrictFallback, strictFallbackProblem } from '../../consensus/strict-fallback.js';
 import type { ReviewResult } from '../../consensus/types.js';
 import { buildRunEnvelope, type ArtifactBytes, type RunEnvelope } from '../../telemetry/envelope.js';
 import { validateRunEnvelope, MAX_ARTIFACT_BYTES } from '../../telemetry/envelope-validation.js';
@@ -96,7 +97,15 @@ function permitsHistoricalUnavailableGate(value: unknown): boolean {
 function assertVerifiedConsensusSource(value: unknown): void {
   if (!value || typeof value !== 'object') return;
   const report = value as Partial<ReviewResult>;
-  if (report.run?.gating?.mode !== 'verified-consensus') return;
+  // A declared strict fallback is checked exactly, and only then exempt from the label rules below.
+  if (strictFallbackProblem({
+    run: report.run, stats: report.stats as ReviewResult['stats'],
+    findings: Array.isArray(report.findings) ? report.findings : [],
+    belowThresholdFindings: Array.isArray(report.belowThresholdFindings) ? report.belowThresholdFindings : [],
+  }) !== undefined) {
+    throw new Error('original_verified_consensus_strict_fallback_invalid');
+  }
+  if (report.run?.gating?.mode !== 'verified-consensus' || declaresStrictFallback(report.run.gating)) return;
   const findings = [
     ...(Array.isArray(report.findings) ? report.findings : []),
     ...(Array.isArray(report.belowThresholdFindings) ? report.belowThresholdFindings : []),
@@ -112,11 +121,12 @@ function assertVerifiedConsensusSource(value: unknown): void {
       throw new Error('original_verified_consensus_verification_unavailable');
     }
     const verdict = verification?.verdict;
+    // Since RCL-198 critical and consensus findings are verified too; only a refutation removes their tier.
     const consistent = reason === 'verified'
       ? verdict === 'confirmed' || verdict === 'unrefuted' || (verdict === 'unavailable' && historicalUnavailableGate)
       : reason === 'none'
         ? verification === undefined || verdict === 'refuted' || verdict === 'insufficient_evidence' || verdict === 'unavailable'
-        : verification === undefined;
+        : verification === undefined || verdict === 'confirmed' || verdict === 'insufficient_evidence' || verdict === 'unavailable';
     if (!consistent) throw new Error('original_verified_consensus_gating_inconsistent');
   }
   if (findings.some(finding => finding.gating?.verification !== undefined) && report.stats?.verification == null) {
@@ -157,7 +167,7 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   knownKeys(report, ['run','reviews','findings','belowThresholdFindings','stats'], 'report');
   knownKeys(report.run, ['id','rcl_version','command','target','roster','config_sha256','thresholds','gating','spec','context_files','plan','runner','started_at','finished_at','duration_ms','ci_exit_code','converge','provenance'], 'header');
   knownKeys(report.run.runner, ['kind','agent','host','ci_run_id'], 'runner');
-  knownKeys(report.run.target, ['kind','repo','pr_number','url','head_sha','base_sha','head_ref','base_ref','diff_sha256','files','additions','deletions'], 'target');
+  knownKeys(report.run.target, ['kind','repo','pr_number','url','head_sha','base_sha','head_ref','base_ref','diff_sha256','left_out','files','additions','deletions'], 'target');
   if (report.run.converge) {
     knownKeys(report.run.converge, ['target','round','attempt','recovery_source'], 'converge');
     if (Object.hasOwn(report.run.converge, 'recovery_source') &&

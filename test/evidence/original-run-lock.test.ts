@@ -71,6 +71,7 @@ it.each(['temporary unlink', 'directory sync'])('releases only its own published
   await expect(withRecoveryLock(root, identity, work)).rejects.toMatchObject({ code: 'EROFS' });
   expect(work).not.toHaveBeenCalled();
   await expect(readFile(join(root, `${sha256(identity)}.lock`))).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(await readdir(root)).toEqual([]);
   await expect(withRecoveryLock(root, identity, async () => 'recovered')).resolves.toBe('recovered');
 });
 

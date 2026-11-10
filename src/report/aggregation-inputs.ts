@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { GatingSchema, ThresholdsSchema } from '../config/schema.js';
-import type { ResolvedGatingConfig } from '../consensus/gating.js';
+import { CURRENT_VERIFIER_CONTRACT_VERSION, type ResolvedGatingConfig } from '../consensus/gating.js';
+import type { TaskContext } from '../prepare/task-context.js';
 import type { Role } from '../roles/types.js';
 import { sha256Hex, stableStringify, type ResolvedThresholds } from './run-header.js';
 
@@ -24,17 +25,22 @@ const roleSchema = z.object({ name: z.string().min(1), systemPrompt: z.string(),
 const roleEntrySchema = z.object({ name: z.string().min(1), role: roleSchema }).strict().refine(entry => entry.name === entry.role.name);
 // loadMergedWeights applies the supported voter's inclusive [0.5, 1.5] range.
 const weightEntrySchema = z.object({ model: z.string().min(1).refine(model => !/[\u0000-\u001f\u007f-\u009f]/.test(model)), weight: z.number().finite().min(0.5).max(1.5) }).strict();
+// Version three captures the task context its verifier prompt carries (RCL-198).
+const taskContextSchema = z.object({ spec: z.string().optional(), prTitle: z.string().optional(), prBody: z.string().optional() }).strict();
 const wireSchema = z.object({
-  version: z.literal(1), verifierContractVersion: z.literal(2).optional(), algorithm: algorithmSchema, diffSha256: digestSchema,
+  version: z.literal(1), verifierContractVersion: z.union([z.literal(2), z.literal(3)]).optional(),
+  taskContext: taskContextSchema.optional(), algorithm: algorithmSchema, diffSha256: digestSchema,
   roles: z.array(roleEntrySchema).refine(rows => rows.every((row, index) => index === 0 || rows[index - 1]!.name < row.name)),
   thresholds: thresholdsSchema, gating: gatingSchema,
   modelWeights: z.array(weightEntrySchema).refine(rows => rows.every((row, index) => index === 0 || rows[index - 1]!.model < row.model)).optional(),
   belowThresholdAppendix: z.boolean(),
-}).strict().refine(wire => wire.verifierContractVersion === 2 || wire.gating.verificationReasoningEffort === undefined);
+}).strict()
+  .refine(wire => wire.verifierContractVersion !== undefined || wire.gating.verificationReasoningEffort === undefined)
+  .refine(wire => wire.verifierContractVersion === 3 || wire.taskContext === undefined);
 const inputSchema = z.object({
   algorithm: algorithmSchema, diffSha256: digestSchema, roleMap: z.instanceof(Map), thresholds: thresholdsSchema,
   gating: gatingSchema.extend({ verificationModel: verifierSchema.optional() }), modelWeights: z.instanceof(Map).optional(),
-  belowThresholdAppendix: z.boolean(),
+  belowThresholdAppendix: z.boolean(), taskContext: taskContextSchema.optional(),
 }).strict();
 
 export interface CaptureAggregationInput {
@@ -48,10 +54,12 @@ export interface CaptureAggregationInput {
   /** Undefined disables weighting; an empty map remains explicitly active. */
   modelWeights?: ReadonlyMap<string, number>;
   belowThresholdAppendix: boolean;
+  /** The bounded spec and pull request text the verifier receives. */
+  taskContext?: TaskContext;
 }
 type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
 export type CapturedAggregationInputs = DeepReadonly<{
-  version: 1; verifierContractVersion?: 2; bytes: string; digest: string; algorithm: typeof AGGREGATION_ALGORITHM; diffSha256: string;
+  version: 1; verifierContractVersion?: 2 | 3; taskContext?: TaskContext; bytes: string; digest: string; algorithm: typeof AGGREGATION_ALGORITHM; diffSha256: string;
   roles: Array<{ name: string; role: Role }>; thresholds: ResolvedThresholds; gating: ResolvedGatingConfig;
   modelWeights?: Array<{ model: string; weight: number }>; belowThresholdAppendix: boolean;
 }>;
@@ -98,7 +106,9 @@ export function captureAggregationInputs(input: CaptureAggregationInput): Captur
     if (!entry.success) throw new Error('aggregation_invalid_input');
     return retain(entry.data);
   }).sort((left, right) => compareKeys(left.model, right.model));
-  const bytes = stableStringify({ version: 1, verifierContractVersion: 2, algorithm: actual.algorithm, diffSha256: actual.diffSha256, roles,
+  const taskContext = actual.taskContext === undefined ? undefined : retain(actual.taskContext);
+  const bytes = stableStringify({ version: 1, verifierContractVersion: CURRENT_VERIFIER_CONTRACT_VERSION,
+    ...(taskContext !== undefined ? { taskContext } : {}), algorithm: actual.algorithm, diffSha256: actual.diffSha256, roles,
     thresholds: actual.thresholds, gating: { ...actual.gating, verificationModel: actual.gating.verificationModel ?? null },
     ...(modelWeights !== undefined ? { modelWeights } : {}), belowThresholdAppendix: actual.belowThresholdAppendix });
   return decodeAggregationInputs(bytes, actual.diffSha256);

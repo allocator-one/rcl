@@ -91,13 +91,14 @@ describe('deterministic verifier planning and replay', () => {
       refuted: 1, unrefuted: 0, confirmed: 0, insufficientEvidence: 1, unavailable: 7, durationMs: 17.5 });
   });
 
-  it('retains deterministic critical and no-context decisions alongside a failed verifier request', () => {
+  it('keeps the critical tier and no-context decisions alongside a failed verifier request', () => {
     const plan = planGating([finding(0, { severity: 'critical' }), finding(1, { file: 'missing.ts' }), finding(2)], options());
     const result = replayGating(plan, [{ batchIndex: 0, kind: 'failure', reason: 'provider unavailable' }], 3);
-    expect(result.findings[0]!.gating).toEqual({ reason: 'critical' });
+    expect(result.findings[0]!.gating).toEqual({ reason: 'critical',
+      verification: { model: 'google/gemini-3.6-flash', verdict: 'unavailable', note: 'provider unavailable' } });
     expect(result.findings[1]!.gating?.verification?.note).toBe('no diff context for this file — not sent to the verifier');
     expect(result.findings[2]!.gating?.verification?.note).toBe('provider unavailable');
-    expect(result.verification).toMatchObject({ candidates: 2, unavailable: 2 });
+    expect(result.verification).toMatchObject({ candidates: 3, unavailable: 3 });
   });
 
   it('replays no-verifier and no-candidate plans without a physical request', () => {

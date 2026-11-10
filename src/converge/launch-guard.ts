@@ -7,7 +7,8 @@ export { launchSchema, type GuardedLaunchState, type GuardedLaunchCompletion, ty
 import { isDeepStrictEqual } from 'node:util';
 import { assertNoPendingFreshReview, freshReviewCompletionPending, freshReviewRequestVersion, prepareFreshReview, finishFreshReview, verifyReviewCycle } from './fresh-review.js';
 import type { ReviewCycleRemote } from './review-cycle.js';
-import { withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
+import { assertNativeTargetOwnership, withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
+import { finishLaunchPreflight, withLaunchPreflight } from './launch-phase.js';
 import { RegistryCleanupError } from '../coordination/registry-lock.js';
 import { convergeAttemptStatePath } from './attempt-budget.js';
 import { realpath } from 'node:fs/promises';
@@ -31,7 +32,7 @@ import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bou
 import { createOriginalLaunch, encodeOriginalLaunch, remainingOriginalBudget,
   type OriginalLaunch, type OriginalLaunchInput } from '../dispatch/original-launch.js';
 import { verifyCyclePendingFinalization } from './pending-finalization-receipt.js';
-import { captureCurrentProcessIdentity } from './process-identity.js';
+import { captureCurrentProcessIdentity, inspectProcessIdentity } from './process-identity.js';
 
 /** Canonical original descriptor prepared under target ownership, before its claim is spent. */
 export interface PreparedOriginalLaunch {
@@ -45,11 +46,39 @@ export interface OriginalLaunchPreflight {
   nowMs?: () => number;
 }
 
+/** Journal namespace of an ordinary guarded council, bound to its retained launch packet (RCL-80). */
+export function ordinaryCheckpointNamespace(packetSha256: string): string {
+  if (!/^[a-f0-9]{64}$/.test(packetSha256)) throw new Error('ordinary_checkpoint_invalid_packet');
+  return `ordinary-${packetSha256.slice(0, 48)}`;
+}
+
+/** The council's journal for an ordinary launch, and whether this invocation resumes it. */
+export interface OrdinaryCheckpoint {
+  readonly namespace: string;
+  readonly resumed: boolean;
+}
+
+/**
+ * A council stopped before quorum with its calls journaled. The launch stays
+ * pending, so rerunning the same guarded command resumes it under the same
+ * attempt instead of spending a new one.
+ */
+export class ReviewCouncilInterrupted extends Error {
+  constructor(readonly completed: number, readonly total: number) {
+    super(`Council interrupted before quorum with ${completed} of ${total} calls journaled; rerun the same command to resume without a new attempt.`);
+    this.name = 'ReviewCouncilInterrupted';
+  }
+}
+
 export interface GuardedLaunchOptions {
+  /** Ownership accepted before slow CLI preflight; reuse it without reacquiring the target. */
+  ownership?: NativeTargetOwnership;
   gitCommonDir: string;
   target: string;
   headSha: string;
   inputSha256: string;
+  /** Refusal-only match for older input formats. Never authorizes claims, admission or checkpoint recovery. */
+  historicalInputSha256?: string;
   recoverySource?: NonNullable<ConvergeContext['recovery_source']>;
   round?: number;
   maxAttempts?: number;
@@ -70,8 +99,15 @@ export interface GuardedLaunchOptions {
     ordinaryInputs: OrdinaryLaunchInputsBinding;
   }>;
   onClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
+  /**
+   * Journal ordinary councils (RCL-80): `exists` reports whether a journal for
+   * the namespace matches the current captured plan. Omission keeps unjournaled
+   * dispatch and today's refusal of an unknown pending launch.
+   */
+  ordinaryCheckpoint?: { exists: (namespace: string) => Promise<boolean> };
   /** Reuse this ownership for durable reviewer checkpoints; never take a second target lock. */
-  run: (context: ConvergeContext, ownership: NativeTargetOwnership, original?: PreparedOriginalLaunch) => Promise<GuardedLaunchCompletion>;
+  run: (context: ConvergeContext, ownership: NativeTargetOwnership, original?: PreparedOriginalLaunch,
+    checkpoint?: OrdinaryCheckpoint) => Promise<GuardedLaunchCompletion>;
 }
 
 export class ReviewLaunchRefused extends Error {
@@ -85,6 +121,13 @@ function refuse(code: string, message: string): never {
   throw new ReviewLaunchRefused(code, message);
 }
 
+/** Names the failed legacy retry invariant without echoing source contents. */
+function legacyRetryInvariant(error: unknown): string {
+  if (error instanceof Error && /^retry_[a-z_]+$/.test(error.message)) return error.message;
+  if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return 'retry_report_source_missing';
+  return 'retry_report_source_malformed';
+}
+
 function nextRound(state: ConvergeRunState): number {
   validateRoundCap(state.roundCap);
   if (state.rounds.some(entry => !Number.isSafeInteger(entry.round) || entry.round < 1)) {
@@ -94,7 +137,9 @@ function nextRound(state: ConvergeRunState): number {
 }
 
 async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number,
-  recordedLaunch: GuardedLaunchState | undefined = state.lastLaunch): Promise<{
+  recordedLaunch: GuardedLaunchState | undefined = state.lastLaunch,
+  /** Round cap the native state was persisted with; recovery receipts are issued against it, not a requested cap. */
+  persistedRoundCap: number = state.roundCap): Promise<{
   round: number;
   retryProof?: Awaited<ReturnType<typeof inspectLegacyRetry>>;
   boundFixRecoverySource?: BoundFixRecoverySource;
@@ -105,7 +150,8 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   if (intent === 'stop-review') refuse('review_stopped', 'No review will launch. Stop only the recorded host task when cancellation was requested.');
   if (intent === 'retry-delivery') refuse('delivery_only', 'Retry evidence delivery with rcl telemetry flush, not another review.');
-  if (!/^[a-f0-9]{40}$/.test(options.headSha) || !/^[a-f0-9]{64}$/.test(options.inputSha256)) {
+  if (!/^[a-f0-9]{40}$/.test(options.headSha) || !/^[a-f0-9]{64}$/.test(options.inputSha256) ||
+      (options.historicalInputSha256 !== undefined && !/^[a-f0-9]{64}$/.test(options.historicalInputSha256))) {
     refuse('invalid_input_identity', 'A guarded launch needs an exact head and effective-input SHA256.');
   }
   if (options.retryReason !== undefined) {
@@ -172,14 +218,12 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   if (previous.status !== 'completed') {
     if (state.cycle && ((previous.status === 'pending' && !previous.runId) || previous.pendingRecovery)) {
-      if (!await verifyCyclePendingFinalization(options.gitCommonDir, state, previous)) {
+      if (!await verifyCyclePendingFinalization(options.gitCommonDir, state, previous, persistedRoundCap)) {
         refuse('cycle_pending_recovery_required',
           'The previous cycle dispatch is not terminal. Authenticate and finalize its pending recovery before launching a successor.');
       }
-      if (previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
-        refuse('cycle_pending_inputs_unchanged',
-          'The recovered dispatch remains unknown; its successor must use materially changed exact review inputs.');
-      }
+      // The recovered dispatch is unknown and its results were never admitted, so an
+      // explicit bounded retry may run a fresh attempt at the same exact inputs.
       if (!options.retryReason) {
         refuse('dispatch_unknown', 'The recovered dispatch remains spent; supply a bounded retry reason for its successor.');
       }
@@ -194,14 +238,25 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
   }
   let retryProof: Awaited<ReturnType<typeof inspectLegacyRetry>> | undefined;
+  if (options.legacyRetry && previous.reviewerHealth) {
+    // 4.2.0 and later record blocking health natively; the report cannot add proof.
+    const { policy, successfulSeats } = previous.reviewerHealth;
+    const seats = `${successfulSeats}/${policy.seatCount} blocking seats, ${policy.minimumSuccessful} required`;
+    refuse('retry_report_current_health', hasSuccessfulQuorum(policy, successfulSeats)
+      ? `Run ${previous.runId} already recorded conclusive blocking health (${seats}); --retry-report proves only 4.1.10–4.1.12 aggregate-only launches.`
+      : `Run ${previous.runId} already recorded its inconclusive blocking health (${seats}); drop --retry-report and repeat the guarded review with --retry-reason alone.`);
+  }
   if (options.legacyRetry) {
     try { retryProof = await inspectLegacyRetry(options.legacyRetry, options.gitCommonDir, state, previous, attemptsUsed, round); }
-    catch { refuse('retry_report_invalid', 'The original report does not prove an inconclusive launch under its bound policy.'); }
+    catch (error) {
+      refuse('retry_report_invalid', `The original report does not prove an inconclusive launch under its bound policy (${legacyRetryInvariant(error)}).`);
+    }
   }
   const healthy = retryProof ? hasSuccessfulQuorum(retryProof.binding.reviewerHealth.policy,
     retryProof.binding.reviewerHealth.successfulSeats) : hasHealthyGuardedLaunch(previous);
+  const admitted = state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId);
   let disposed = terminalRejected;
-  if (healthy && !terminalRejected && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
+  if (healthy && !terminalRejected && !admitted) {
     const candidates = (state.staleReportAudit ?? []).filter(e => staleManifest(e).attempt === previous.attempt);
     const entry = candidates.find(e => {
       const m = staleManifest(e);
@@ -237,16 +292,23 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     }
 
   }
-  if (healthy && !disposed && !boundFixRecoverySource && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
-    refuse('inputs_unchanged', (resolution?.fixedThisRound ?? 0) > 0
+  // A format upgrade alone must not authorize blind re-review of an admitted
+  // legacy report. Unadmitted stale reports still require the audited path
+  // above, and an inspected legacy health retry keeps its original proof.
+  if (healthy && !disposed && !boundFixRecoverySource && previous.headSha === options.headSha &&
+      (previous.inputSha256 === options.inputSha256 || previous.inputSha256 === options.historicalInputSha256)) {
+    refuse('inputs_unchanged', (resolution?.gatingFixedThisRound ?? 0) > 0
       ? 'A real fix needs changed review inputs and a fresh resulting head.'
       : 'These inputs were already reviewed; upstream tip movement alone needs no new council.');
   }
   // A disposed unadmitted report may already follow the fixed round's commit.
-  if (healthy && !disposed && (resolution?.fixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
+  if (healthy && !disposed && (resolution?.gatingFixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
     refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
   }
-  if ((previous.hardFailure || !healthy) && !options.retryReason) {
+  // A seat that errored or failed to parse inside a conclusive, admitted round
+  // is already accounted for by the quorum; only an unhealthy or unadmitted
+  // hard failure is an infrastructure failure of the launch (RCL-205).
+  if ((!healthy || (previous.hardFailure && !admitted)) && !options.retryReason) {
     refuse('infrastructure_failure', 'A head change cannot cure the previous infrastructure failure; supply an explicit bounded retry reason after recovery.');
   }
   if (!healthy && !previous.reviewerHealth && !retryProof) {
@@ -264,6 +326,8 @@ export function hasHealthyGuardedLaunch(previous: GuardedLaunchState): boolean {
 
 export interface GuardedLaunchClaim extends ConvergeAttemptClaim {
   resumedCompletion?: GuardedLaunchCompletion;
+  /** This invocation continued an interrupted journaled council under its existing claim. */
+  resumedInterrupted?: true;
 }
 
 export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<GuardedLaunchClaim> {
@@ -287,15 +351,19 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Gu
     ...(input.legacyRetry ? { legacyRetry: { ...structuredClone(input.legacyRetry), reportPath: resolve(input.legacyRetry.reportPath) } } : {}) };
   options.gitCommonDir = await realpath(resolve(options.gitCommonDir));
   const requestVersion = options.startOver ? await freshReviewRequestVersion(options.gitCommonDir, options.target) : undefined;
+  if (options.ownership) {
+    await assertNativeTargetOwnership(options.ownership, options.gitCommonDir, options.target);
+    return guardReviewLaunchOwned(options, options.ownership);
+  }
   let completed: GuardedLaunchClaim | undefined;
   try {
-    return await withNativeTarget(options.gitCommonDir, options.target, async ownership => {
+    return await withNativeTarget(options.gitCommonDir, options.target, ownership => withLaunchPreflight(ownership, options.gitCommonDir, options.target, async () => {
       if (options.startOver && await freshReviewRequestVersion(options.gitCommonDir, options.target) !== requestVersion) {
         refuse('fresh_review_request_changed', 'Another launch handled the pending fresh request; inspect its outcome before requesting another cycle.');
       }
       completed = await guardReviewLaunchOwned(options, ownership);
       return completed;
-    }, { lockTimeoutMs: 5_000 });
+    }), { lockTimeoutMs: 5_000 });
   } catch (error) {
     if (!(error instanceof RegistryCleanupError) || !completed || error.result !== completed) throw error;
     completed.warning = `Attempt ${completed.attempt}/${completed.cap} is durably recorded; target lock cleanup failed. Do not repeat the claim: ${error.message}`;
@@ -303,7 +371,74 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Gu
   }
 }
 
+/**
+ * Continue the latest pending ordinary launch when its process has exited, its
+ * exact head and inputs are requested again and its council journal matches
+ * the current capture. No attempt is claimed and the round is unchanged; any
+ * other pending launch keeps today's refusal path.
+ */
+async function resumeInterruptedOrdinary(options: GuardedLaunchOptions, ownership: NativeTargetOwnership,
+  freshOperation?: string): Promise<GuardedLaunchClaim | undefined> {
+  const checkpoint = options.ordinaryCheckpoint;
+  if (!checkpoint || (options.startOver ?? false) !== (freshOperation !== undefined) || options.originalLaunch ||
+    options.legacyRetry || options.boundFixRecovery || options.recoverySource || options.consumeAttempt !== undefined ||
+    (options.intent ?? 'review') !== 'review') return undefined;
+  // An ordinary continuation never bypasses a pending fresh request; an
+  // interrupted fresh request resumes only through its own --start-over.
+  if (!freshOperation) await assertNoPendingFreshReview(options.gitCommonDir, options.target);
+  const native = await loadConvergeRunStateEvidence(options.gitCommonDir, options.target);
+  const attempts = await previewConvergeAttemptState(options.gitCommonDir, options.target);
+  const state = native?.state;
+  if (!state || state.version === 3 || !attempts || !state.lastLaunch || !isDeepStrictEqual(state.cycle, attempts.cycle) ||
+    (freshOperation !== undefined && state.cycle?.operationId !== freshOperation)) return undefined;
+  // Anything unexpected falls through to the ordinary guard and its refusals.
+  const parsed = launchSchema.safeParse(state.lastLaunch);
+  if (!parsed.success) return undefined;
+  const previous = parsed.data;
+  if (previous.status !== 'pending' || previous.attempt !== attempts.attemptsUsed || !previous.ordinaryInputs ||
+    previous.headSha !== options.headSha || previous.inputSha256 !== options.inputSha256 ||
+    previous.runId || previous.retainedOriginal || previous.pendingResume || previous.pendingRecovery || previous.recovery ||
+    !previous.processIdentity || await inspectProcessIdentity(previous.processIdentity).catch(() => 'unverifiable') !== 'dead') return undefined;
+  const namespace = ordinaryCheckpointNamespace(previous.ordinaryInputs.packetSha256);
+  if (!await checkpoint.exists(namespace)) return undefined;
+  if (state.cycle) {
+    await verifyReviewCycle(options.gitCommonDir, options.target, state.cycle);
+    const remote = options.cycleRemote;
+    if (!remote || remote.repo.toLowerCase() !== state.cycle.repo || remote.prNumber !== state.cycle.prNumber || remote.url !== state.cycle.url) {
+      refuse('fresh_review_remote_mismatch', 'Continue this cycle against its original Harness PR.');
+    }
+    if ((await remote.current())?.id !== state.cycle.id) refuse('fresh_review_superseded', 'This review cycle has been replaced.');
+  }
+  await options.validate();
+  // The launch keeps its original claimant: the attempt ledger and every
+  // pending-recovery path bind that identity. This guard holds the native
+  // target lock for the whole run, which excludes a concurrent resumer.
+  state.lastLaunch = previous;
+  await finishLaunchPreflight(ownership, options.gitCommonDir, options.target);
+  const context = { target: options.target, round: previous.round, attempt: previous.attempt,
+    ...(state.cycle ? { cycleId: state.cycle.id } : {}) };
+  let failure: { error: unknown } | undefined;
+  try {
+    const completion = completionSchema.parse(await options.run(context, ownership, undefined, { namespace, resumed: true }));
+    state.lastLaunch = { ...state.lastLaunch, ...completion, status: 'completed' };
+  } catch (error) {
+    if (!(error instanceof ReviewCouncilInterrupted)) state.lastLaunch.status = 'failed';
+    failure = { error };
+  }
+  state.updatedAt = new Date().toISOString();
+  await writeState(options.gitCommonDir, state, ownership);
+  if (freshOperation && !(failure?.error instanceof ReviewCouncilInterrupted)) {
+    await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
+  }
+  if (failure) throw failure.error;
+  return { target: options.target, attempt: previous.attempt, attemptsUsed: attempts.attemptsUsed, cap: attempts.cap,
+    stateFile: convergeAttemptStatePath(options.gitCommonDir, options.target),
+    ...(attempts.cycle ? { cycle: attempts.cycle } : {}), resumedInterrupted: true };
+}
+
 async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: NativeTargetOwnership): Promise<GuardedLaunchClaim> {
+  const resumed = await resumeInterruptedOrdinary(options, ownership);
+  if (resumed) return resumed;
   let preparedOriginal: PreparedOriginalLaunch | undefined;
   const assertOriginalLive = () => {
     if (preparedOriginal && remainingOriginalBudget(preparedOriginal.launch,
@@ -332,6 +467,8 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         cap: attempts.cap, cycle: fresh.cycle, stateFile: convergeAttemptStatePath(options.gitCommonDir, options.target),
         resumedCompletion: completionSchema.parse(resumed.lastLaunch) };
     }
+    const resumedFresh = await resumeInterruptedOrdinary(options, ownership, freshOperation);
+    if (resumedFresh) return resumedFresh;
     if (completionPending) await options.validate();
     if (attempts && attempts.attemptsUsed > 0 && options.retryReason === undefined) {
       options.retryReason = 'Resuming an explicitly requested fresh review after interrupted local dispatch; previous attempts remain spent.';
@@ -369,6 +506,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         if (!(error instanceof StaleReportAuditError)) throw error;
         refuse('stale_report_audit_invalid','Retained stale-report evidence is missing or inconsistent; no attempt was claimed.');
       }
+      const persistedRoundCap = state.roundCap;
       if (options.maxRounds !== undefined) {
         const cap = validateRoundCap(options.maxRounds);
         if (recovered && cap !== state.roundCap) {
@@ -398,7 +536,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
       }
       const guardedAttemptsUsed = preclaimed ? attempts!.attemptsUsed - 1 : attempts?.attemptsUsed ?? 0;
       const { round, retryProof, boundFixRecoverySource } = await requireLaunch(options, state, guardedAttemptsUsed,
-        recovered ? attempts?.lastLaunch : state.lastLaunch);
+        recovered ? attempts?.lastLaunch : state.lastLaunch, persistedRoundCap);
       const cap = options.maxAttempts ?? attempts?.cap;
       if (!preclaimed && cap !== undefined && attempts && attempts.attemptsUsed >= cap) {
         throw new ConvergeAttemptBudgetExceededError(options.target, attempts.attemptsUsed, cap);
@@ -450,24 +588,35 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         }
       };
       await persistLaunch();
+      await finishLaunchPreflight(ownership, options.gitCommonDir, options.target);
       try {
         if (!claimed.preclaimed) await options.onClaim?.(claimed);
         const context = { target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt,
           ...(state.cycle ? { cycleId: state.cycle.id } : {}),
           ...(options.recoverySource ? { recovery_source: options.recoverySource } : {}) };
+        const ordinaryInputs = state.lastLaunch!.ordinaryInputs;
+        const checkpoint = options.ordinaryCheckpoint && ordinaryInputs && !recovered
+          ? { namespace: ordinaryCheckpointNamespace(ordinaryInputs.packetSha256), resumed: false } : undefined;
         const completion = completionSchema.parse(await (preparedOriginal
-          ? options.run(context, ownership, preparedOriginal) : options.run(context, ownership)));
+          ? options.run(context, ownership, preparedOriginal)
+          : checkpoint ? options.run(context, ownership, undefined, checkpoint) : options.run(context, ownership)));
         if (preparedOriginal && completion.runId !== preparedOriginal.launch.runId) {
           refuse('original_launch_run_mismatch', 'The completion differs from the prepared original run.');
         }
         state.lastLaunch = { ...state.lastLaunch!, ...completion, status: 'completed' };
       } catch (error) {
-        state.lastLaunch!.status = 'failed';
+        // A journaled council stopped before quorum stays pending: rerunning
+        // the same command resumes it under this claim (RCL-80).
+        if (!(error instanceof ReviewCouncilInterrupted)) state.lastLaunch!.status = 'failed';
         failure = { error };
       }
       state.updatedAt = new Date().toISOString();
       await persistLaunch();
-      if (freshOperation) await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
+      // An interrupted fresh council stays pending: rerunning the same
+      // --start-over command resumes it instead of requesting another cycle.
+      if (freshOperation && !(failure?.error instanceof ReviewCouncilInterrupted)) {
+        await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
+      }
     },
   }).catch(async (error: unknown) => {
     if (freshOperation && error instanceof ConvergeAttemptBudgetExceededError) {

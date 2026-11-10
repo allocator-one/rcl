@@ -11,9 +11,9 @@ import { claimConvergeAttempt, convergeAttemptStatePath, previewConvergeAttemptS
   type ConvergeAttemptClaim, type ConvergeAttemptState } from './attempt-budget.js';
 import { withRecoveryTarget, type NativeTargetOwnership } from './target-ownership.js';
 import { bindOriginalCouncil } from '../dispatch/original-execution.js';
-import { createOriginalLaunch, type OriginalLaunch } from '../dispatch/original-launch.js';
+import { createOriginalLaunch, encodeOriginalLaunch, type OriginalLaunch } from '../dispatch/original-launch.js';
 import type { CapturedPreparedCouncil } from '../dispatch/capture-council.js';
-import type { CheckpointJournal } from '../dispatch/checkpoint.js';
+import { CheckpointJournal, checkpointPath } from '../dispatch/checkpoint.js';
 import { consumeBoundAsyncHistory, snapshotAsyncHistory,
   type AsyncResultReference } from '../dispatch/async-lane.js';
 import { uuidv7 } from '../report/uuid.js';
@@ -28,6 +28,7 @@ import { createPendingRecoverySource, createOrdinaryMigrationSource, createCycle
 import { validateOrdinaryPendingPackage, type OrdinaryPendingPackage } from './ordinary-pending-package.js';
 import { assertReviewCyclePair } from './fresh-review.js';
 import type { ReviewCycleRemote } from './review-cycle.js';
+import { readPendingTerminalReport } from './pending-terminal-report.js';
 
 export interface PendingLegacyResumeExecution {
   context: { target: string; attempt: number; round: number };
@@ -45,6 +46,8 @@ export interface PendingLegacyResumeOptions {
   baseSha?: string;
   pendingInputSha256: string;
   recoveryInputSha256: string;
+  /** Existing successor replay only, authenticated by its exact captured inputs and plan. Never used for a claim. */
+  historicalRecoveryInputSha256?: string;
   retryReason: string;
   legacyRetry?: LegacyRetrySelection;
   captured: CapturedPreparedCouncil;
@@ -80,6 +83,8 @@ export interface OrdinaryPendingPreview {
   attemptsUsed: number;
   cap: number;
   nextAttempt: number;
+  resumedCheckpoint?: true;
+  runId?: string;
   currentPrHeadSha?: string;
   previewSha256?: string;
 }
@@ -129,7 +134,8 @@ const ordinaryPendingFinalizationReceiptBodySchema = z.object({
   cap: z.number().int().positive().safe(),
   nextFreeAttempt: z.number().int().positive().safe(),
   blockingOutcome: z.literal('unknown'),
-  retainedAsyncSha256: z.array(digestSchema).min(1),
+  // Empty only for a council without async seats, which the package proved.
+  retainedAsyncSha256: z.array(digestSchema),
   sourceNativeStateSha256: digestSchema,
   sourceAttemptStateSha256: digestSchema,
   finalizedNativeStateSha256: digestSchema,
@@ -164,8 +170,8 @@ const ordinaryPendingFinalizationReceiptSchema = z.union([
   }
   if (receipt.nextFreeAttempt !== receipt.finalizedAttempt + 1 ||
       receipt.attemptsUsed !== receipt.finalizedAttempt || receipt.attemptsUsed > receipt.cap ||
-      (receipt.version === 1 && (receipt.retainedAsyncSha256.length === 0 ||
-        new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length))) {
+      (receipt.version === 1 &&
+        new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length)) {
     context.addIssue({ code: 'custom', message: 'Pending finalization accounting is inconsistent' });
   }
   if (receipt.version === 2 && (receipt.attemptCap !== receipt.cap || receipt.round > receipt.roundCap)) {
@@ -305,6 +311,9 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
   const hashes = input?.retainedAsyncSha256;
   const cycleFinalizePreview = input?.migrationPackage?.version === 2 &&
     input.previewMode === 'finalize-only';
+  // A legacy ordinary package may bind no async results; its validation
+  // accepts that only for a council without async seats.
+  const ordinaryPackage = !!input?.migrationPackage && input.migrationPackage.version !== 2;
   const currentPrHeadValid = input?.currentPrHeadSha === undefined ||
     (cycleFinalizePreview && /^[a-f0-9]{40}$/.test(input.currentPrHeadSha));
   if (!input || typeof input.gitCommonDir !== 'string' || typeof input.target !== 'string' || !input.target.trim() ||
@@ -312,9 +321,11 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
     (input.migrationPackage && !/^[a-f0-9]{40}$/.test(input.baseSha ?? '')) ||
     !/^[a-f0-9]{64}$/.test(input.pendingInputSha256 ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.recoveryInputSha256 ?? '') ||
+    (input.historicalRecoveryInputSha256 !== undefined && !/^[a-f0-9]{64}$/.test(input.historicalRecoveryInputSha256)) ||
     typeof input.retryReason !== 'string' || !input.retryReason.trim() || input.retryReason.length > 500 ||
     !Array.isArray(hashes) || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-    (!cycleFinalizePreview && (hashes.length === 0 || new Set(hashes).size !== hashes.length)) ||
+    (!cycleFinalizePreview && ((hashes.length === 0 && !ordinaryPackage) ||
+      new Set(hashes).size !== hashes.length)) ||
     typeof input.validate !== 'function' ||
     typeof input.run !== 'function' || typeof input.loadRetainedAsync !== 'function' ||
     (!input.migrationPackage && !input.legacyRetry) ||
@@ -342,7 +353,7 @@ function validateFinalizeOptions(input: OrdinaryPendingFinalizeOptions): void {
     !/^[a-f0-9]{64}$/.test(input.nativeStateSha256 ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.attemptStateSha256 ?? '') ||
     !Array.isArray(hashes) || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-    (!cycleBacked && (hashes.length === 0 || new Set(hashes).size !== hashes.length)) ||
+    (!cycleBacked && new Set(hashes).size !== hashes.length) ||
     typeof input.loadRetainedAsync !== 'function' ||
     (input.writeFinalizedState !== undefined && typeof input.writeFinalizedState !== 'function') ||
     (input.consumeCycleHistory !== undefined && typeof input.consumeCycleHistory !== 'function') ||
@@ -742,6 +753,50 @@ function validateAsyncArtifacts(source: Pick<PendingRecoverySource, 'retainedAsy
   }
 }
 
+/** Authenticate an existing successor before preview or any recovery write. */
+async function inspectCheckpointedPending(options: PendingLegacyResumeOptions,
+  attempts: ConvergeAttemptState, current: GuardedLaunchState) {
+  const record = attempts.attempts.at(-1), source = record?.pendingRecoverySource;
+  const resume = current.pendingResume;
+  if (options.maxAttempts !== attempts.cap) fail('attempt_cap_mismatch');
+  if (!source || !resume || record!.attempt !== attempts.attemptsUsed ||
+      current.attempt !== attempts.attemptsUsed || current.attempt !== source.pendingAttempt + 1 ||
+      current.round !== source.round || current.pid !== record!.pid || resume.originalPid !== source.originalPid ||
+      source.headSha !== options.headSha || source.inputSha256 !== options.pendingInputSha256 ||
+      current.headSha !== options.headSha ||
+      (current.inputSha256 !== options.recoveryInputSha256 && current.inputSha256 !== options.historicalRecoveryInputSha256) ||
+      resume.planDigest !== options.captured.plan.digest ||
+      resume.capturedInputsSha256 !== options.captured.captured.digest ||
+      !isDeepStrictEqual(current.pendingRecovery, descriptor(source))) fail('capture_mismatch');
+  const packet = options.migrationPackage && validateOrdinaryPendingPackage(options.migrationPackage, {
+    target: options.target, headSha: source.headSha, inputSha256: source.inputSha256,
+    baseSha: options.baseSha!, attempt: source.pendingAttempt, round: source.round, pid: source.originalPid,
+    retainedAsyncSha256: options.retainedAsyncSha256,
+  });
+  if ('migrationPackageSha256' in source && (!packet ||
+      createHash('sha256').update(stableStringify(packet)).digest('hex') !== source.migrationPackageSha256)) {
+    fail('capture_mismatch');
+  }
+  if (source.retainedAsyncSha256.join(',') !== options.retainedAsyncSha256.join(',')) fail('async_binding_mismatch');
+  if (current.status === 'completed') {
+    if (current.runId !== resume.runId) fail('completed_mismatch');
+  } else if (resume.phase === 'running' && (options.ownerAlive ?? defaultOwnerAlive)(resume.pid)) fail('owner_alive');
+  const launch = createOriginalLaunch({ runId: resume.runId, target: options.target,
+    originalNativeClaim: { attempt: current.attempt, round: current.round },
+    capturedInputsSha256: resume.capturedInputsSha256, planDigest: resume.planDigest,
+    startedAtMs: resume.startedAtMs, expiresAtMs: resume.expiresAtMs,
+    maxPhysicalCalls: resume.maxPhysicalCalls, maxAttemptsPerCell: resume.maxAttemptsPerCell });
+  // An established successor must reopen its checkpoint, never create a new
+  // journal under an already spent claim when the retained work is missing.
+  const journal = await CheckpointJournal.openRead(
+    checkpointPath(options.gitCommonDir, options.target, resume.runId), options.captured.plan);
+  const bindings = await journal.readBindings();
+  if (bindings['captured-inputs'] !== options.captured.captured.bytes ||
+      bindings.launch !== encodeOriginalLaunch(launch)) fail('capture_mismatch');
+  await readPendingTerminalReport(journal, launch);
+  return { source, resume, launch, packet };
+}
+
 /** Authenticate an ordinary dead-owner recovery under its target lock without mutating native state. */
 export async function previewOrdinaryPendingLaunch(input: PendingLegacyResumeOptions): Promise<OrdinaryPendingPreview> {
   validateOptions(input);
@@ -755,6 +810,19 @@ export async function previewOrdinaryPendingLaunch(input: PendingLegacyResumeOpt
     ]);
     if (!state || !attempts || !state.lastLaunch) fail('missing_launch');
     const current = launchSchema.parse(state.lastLaunch);
+    if (options.previewMode !== 'finalize-only' && current.pendingResume &&
+        attempts.attempts.at(-1)?.pendingRecoverySource) {
+      if (state.cycle || attempts.cycle) fail('cycle_mismatch');
+      const { source, resume, packet } = await inspectCheckpointedPending(options, attempts, current);
+      validateAsyncArtifacts(source, await options.loadRetainedAsync(), packet);
+      const [nativeBytes, attemptBytes] = await Promise.all([
+        readStable(convergeRunStatePath(options.gitCommonDir, options.target)),
+        readStable(convergeAttemptStatePath(options.gitCommonDir, options.target)),
+      ]);
+      return { source, nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
+        attemptsUsed: attempts.attemptsUsed, cap: attempts.cap, nextAttempt: current.attempt,
+        resumedCheckpoint: true as const, runId: resume.runId };
+    }
     const record = attempts.attempts.find(item => item.attempt === current.attempt);
     if (!record || current.status !== 'pending' || current.attempt !== attempts.attemptsUsed ||
       current.headSha !== options.headSha || current.inputSha256 !== options.pendingInputSha256) fail('launch_mismatch');
@@ -909,25 +977,13 @@ async function resumeFresh(options: PendingLegacyResumeOptions, ownership: Nativ
     const completion = await runBound(options, ownership, state, claim, source, launch, resume);
     return { claim, completion, reusedCompletion: false };
   }
-  const resume = current.pendingResume;
-  if (!resume || current.attempt !== attempts.attemptsUsed ||
-      current.headSha !== options.headSha || current.inputSha256 !== options.recoveryInputSha256 ||
-      resume.planDigest !== options.captured.plan.digest ||
-      resume.capturedInputsSha256 !== options.captured.captured.digest ||
-      current.pendingRecovery?.sourceDigest !== source.digest) fail('capture_mismatch');
+  const { resume, launch } = await inspectCheckpointedPending(options, attempts, current);
   if (current.status === 'completed') {
-    if (!current.runId || current.runId !== resume.runId) fail('completed_mismatch');
     return { claim, completion: completionSchema.parse(current), reusedCompletion: true };
   }
-  if (resume.phase === 'running' && (options.ownerAlive ?? defaultOwnerAlive)(resume.pid)) fail('owner_alive');
   await options.validate();
   const artifacts = await options.loadRetainedAsync();
   await archiveAsync(options.gitCommonDir, source, artifacts);
-  const launch = createOriginalLaunch({ runId: resume.runId, target: options.target,
-    originalNativeClaim: { attempt: current.attempt, round: current.round },
-    capturedInputsSha256: resume.capturedInputsSha256, planDigest: resume.planDigest,
-    startedAtMs: resume.startedAtMs, expiresAtMs: resume.expiresAtMs,
-    maxPhysicalCalls: resume.maxPhysicalCalls, maxAttemptsPerCell: resume.maxAttemptsPerCell });
   state.lastLaunch = { ...current, status: 'pending',
     pendingResume: { ...resume, pid: process.pid, phase: 'running' } };
   state.updatedAt = new Date().toISOString();
@@ -952,6 +1008,9 @@ export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOption
       previewConvergeAttemptState(options.gitCommonDir, options.target),
     ]);
     if (!state || !attempts || !state.lastLaunch) fail('missing_launch');
+    // Combined recovery is ordinary only: a cycle-backed launch terminalizes
+    // with finalize-only recovery bound to its cycle, never a stripped package.
+    if (options.migrationPackage && state.cycle) fail('cycle_mismatch');
     const current = launchSchema.parse(state.lastLaunch);
     const persistedSource = attempts.attempts.at(-1)?.pendingRecoverySource;
     const original = persistedSource ?? current;

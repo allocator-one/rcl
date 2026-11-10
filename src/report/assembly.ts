@@ -4,7 +4,10 @@ import { DEFAULT_QUORUM_FRACTION, DEFAULT_THRESHOLDS } from '../config/defaults.
 import { deriveBlockingHealth, summarizeBlockingHealth } from './blocking-health.js';
 import type { DedupeOrdering } from '../consensus/deduper.js';
 import type { Config } from '../config/schema.js';
-import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
+import {
+  applyGatingWithFallback, effectiveVerificationPassTimeoutMs, planGating, type GatingOptions, type ResolvedGatingConfig,
+} from '../consensus/gating.js';
+import { applyStrictFallback, strictFallbackCause, type StrictFallbackMarker } from '../consensus/strict-fallback.js';
 import type { ConsensusFinding, ModelReview, ReviewResult } from '../consensus/types.js';
 import { mergeChunkReviews } from '../dispatch/merge.js';
 import type { Diff } from '../resolver/types.js';
@@ -14,6 +17,7 @@ import { uuidv7 } from './uuid.js';
 import { assertReviewerHealth, type ReviewerHealth } from './reviewer-health.js';
 import { deriveConsensusAssembly, type ConsensusAssembly, type ConsensusAssemblyContribution } from './consensus-assembly.js';
 import type { RecoveredProduction } from '../converge/recovered-production.js';
+import type { TaskContext } from '../prepare/task-context.js';
 
 export interface CompletedReviewInput {
   chunkReviews: ModelReview[];
@@ -27,6 +31,8 @@ export interface CompletedReviewInput {
   modelWeights?: Map<string, number>;
   recoveredProduction?: RecoveredProduction;
   dedupeOrdering?: DedupeOrdering;
+  /** The reviewers' spec and pull request text, for the verifier (RCL-198). */
+  taskContext?: TaskContext;
   /** Validated original-seat health for proof-bearing reports; never deserialized counts. */
   reviewerHealth?: ReviewerHealth;
   run: Omit<RunHeaderInput, 'config' | 'diff' | 'gating' | 'thresholds' | 'finishedAt' | 'ciExitCode'>;
@@ -80,14 +86,16 @@ export async function assembleCompletedReview(
   });
 
   // Convergence gating (RCL-23): annotate every kept finding with why it
-  // does or does not gate; single-model blocking findings get one batched
-  // evidence-based adjudication call.
+  // does or does not gate; critical and important findings get batched
+  // evidence-based adjudication calls.
   let finalFindings = retained?.findings ?? reportFindings;
   let gatedAppendix = retained?.appendix ?? droppedFindings;
   let verificationStats = retained?.verification;
+  let strictFallback: StrictFallbackMarker | undefined;
+  let scaledPassTimeoutMs: number | undefined;
   if (retained === undefined && gatingConfig.mode === 'verified-consensus' && (input.reviewerHealth === undefined || input.reviewerHealth.conclusive)) {
     dependencies.onVerificationStart?.();
-    const gated = await applyGatingWithFallback(reportFindings, {
+    const gatingOptions: GatingOptions = {
       minModels: gatingConfig.minModels,
       verificationModel: gatingConfig.verificationModel,
       verificationReasoningEffort: gatingConfig.verificationReasoningEffort,
@@ -98,13 +106,31 @@ export async function assembleCompletedReview(
       onVerificationProgress: dependencies.onVerificationProgress,
       diffFiles: diff.files,
       ...(modelWeights ? { modelWeights } : {}),
-    });
+      ...(input.taskContext ? { taskContext: input.taskContext } : {}),
+    };
+    // The bound the pass applies, recorded when its workload stretched the
+    // configured one (RCL-206). A plan that cannot be built fails inside the
+    // pass below, which keeps the council's result.
+    try {
+      const passTimeoutMs = effectiveVerificationPassTimeoutMs(planGating(reportFindings, gatingOptions));
+      if (passTimeoutMs > gatingConfig.verificationPassTimeoutMs) scaledPassTimeoutMs = passTimeoutMs;
+    } catch {
+      scaledPassTimeoutMs = undefined;
+    }
+    const gated = await applyGatingWithFallback(reportFindings, gatingOptions);
     finalFindings = gated.findings;
     verificationStats = gated.ok ? gated.verification : undefined;
     if (!gated.ok) {
       (dependencies.onWarning ?? console.warn)(
         `Gating pass failed (${String(gated.failure)}); falling back to severity gating for this round.`
       );
+      // The fallback is declared, and every finding labelled, so delivery
+      // never reads an unlabelled blocker as `none` (RCL-160).
+      const fallback = applyStrictFallback(reportFindings, droppedFindings, strictFallbackCause(gated.failure),
+        gatingConfig.verificationModel);
+      finalFindings = fallback.findings;
+      gatedAppendix = fallback.appendix;
+      strictFallback = fallback.marker;
     } else {
       // Appendix findings never block convergence; mark them so the report
       // JSON carries a gating reason on every finding.
@@ -171,6 +197,8 @@ export async function assembleCompletedReview(
     config,
     diff,
     gating: gatingConfig,
+    ...(strictFallback ? { strictFallback } : {}),
+    ...(scaledPassTimeoutMs !== undefined ? { verificationPassEffectiveTimeoutMs: scaledPassTimeoutMs } : {}),
     thresholds: {
       minConsensusScore: config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore,
       minConfidence: config.thresholds?.minConfidence ?? DEFAULT_THRESHOLDS.minConfidence,

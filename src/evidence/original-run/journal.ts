@@ -58,9 +58,16 @@ export interface JournalCheckpoint {
   operation_id: string; manifest_sha256: string; sequence: number;
   previous_sha256: string; phase: string; recorded_at: string; data: unknown;
 }
+export type JournalAppendCapacityEntry =
+  | { phase: string; data: unknown }
+  | { maximumBytes: number };
 export interface ReadableJournal extends Journal {
   /** Local audit facts only; a remote acknowledgment still needs exact readback. */
   checkpoints: () => JournalCheckpoint[];
+  /** Refuse a multi-checkpoint operation before its first durable or remote side effect. */
+  assertAppendCapacity: (additionalCheckpoints: number, maximumAdditionalBytes: number) => void;
+  /** Reserve exact known checkpoints together with bounded unknown future records. */
+  assertAppendPlanCapacity: (entries: readonly JournalAppendCapacityEntry[]) => void;
 }
 
 /** Storage qualification is explicit; recovery callers retain the strict default. */
@@ -110,9 +117,56 @@ export async function openJournal(path: string, manifestSha: string, operation: 
   }
   await syncDirectory(path);
   await syncDirectory(dirname(path));
-  const journal: ReadableJournal = { checkpoints: () => structuredClone(checkpoints), append: async (phase, data = null) => {
+  const assertAppendCapacity = (additionalCheckpoints: number, maximumAdditionalBytes: number) => {
+    if (!Number.isSafeInteger(additionalCheckpoints) || additionalCheckpoints < 0 ||
+        !Number.isSafeInteger(maximumAdditionalBytes) || maximumAdditionalBytes < 0) {
+      throw new Error('invalid_recovery_journal_capacity');
+    }
+    if (additionalCheckpoints > MAX_RECOVERY_CHECKPOINTS - sequence ||
+        maximumAdditionalBytes > MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES - retainedBytes) {
+      throw new Error('recovery_journal_checkpoint_limit');
+    }
+  };
+  const assertAppendPlanCapacity = (entries: readonly JournalAppendCapacityEntry[]) => {
+    if (!Array.isArray(entries)) throw new Error('invalid_recovery_journal_capacity');
+    let maximumAdditionalBytes = 0;
+    for (const [index, entry] of entries.entries()) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error('invalid_recovery_journal_capacity');
+      }
+      const keys = Object.keys(entry);
+      let bytes: number;
+      if ('maximumBytes' in entry) {
+        if (keys.length !== 1 || !Number.isSafeInteger(entry.maximumBytes) || entry.maximumBytes < 0 ||
+            entry.maximumBytes > MAX_RECOVERY_CHECKPOINT_BYTES) {
+          throw new Error('invalid_recovery_journal_capacity');
+        }
+        bytes = entry.maximumBytes;
+      } else {
+        if (keys.length !== 2 || !keys.includes('phase') || !keys.includes('data') ||
+            typeof entry.phase !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(entry.phase)) {
+          throw new Error('invalid_recovery_journal_capacity');
+        }
+        let data: unknown;
+        try { data = JSON.parse(JSON.stringify(entry.data)); }
+        catch { throw new Error('invalid_recovery_journal_capacity'); }
+        const record: JournalCheckpoint = { operation_id: operation, manifest_sha256: manifestSha,
+          sequence: sequence + index + 1, previous_sha256: '0'.repeat(64), phase: entry.phase,
+          recorded_at: '9999-12-31T23:59:59.999Z', data };
+        bytes = Buffer.byteLength(serializeRecoveryDocument(record, MAX_RECOVERY_CHECKPOINT_BYTES), 'utf8');
+      }
+      if (bytes > Number.MAX_SAFE_INTEGER - maximumAdditionalBytes) {
+        throw new Error('invalid_recovery_journal_capacity');
+      }
+      maximumAdditionalBytes += bytes;
+    }
+    assertAppendCapacity(entries.length, maximumAdditionalBytes);
+  };
+  const journal: ReadableJournal = { checkpoints: () => structuredClone(checkpoints), assertAppendCapacity,
+    assertAppendPlanCapacity,
+    append: async (phase, data = null) => {
     if (typeof phase !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(phase)) throw new Error('invalid_recovery_checkpoint');
-    if (sequence >= MAX_RECOVERY_CHECKPOINTS) throw new Error('recovery_journal_checkpoint_limit');
+    assertAppendCapacity(1, 0);
     const retainedData: unknown = JSON.parse(JSON.stringify(data));
     await beforeWrite?.(phase);
     const current = await lstat(path, { bigint: true });

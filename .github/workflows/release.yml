@@ -97,6 +97,9 @@ jobs:
           RCL_HISTORICAL_PACKED_CLI="$SMOKE_DIR/node_modules/.bin/rcl" \
             npm test -- --maxWorkers=1 test/converge/historical-delivery-reconciliation.test.ts \
               -t "previews and applies through the supported CLI with GET-only server access"
+          RCL_STALE_PACKED_CLI="$SMOKE_DIR/node_modules/.bin/rcl" \
+            npm test -- --maxWorkers=1 test/converge/legacy-delivered-stale-recovery.test.ts \
+              -t "recovers through public flush and stale CLI, then permits exactly one successor within the original caps"
 
           PACKAGE_SHA256=$(sha256sum "${packages[0]}" | cut -d ' ' -f 1)
           echo "filename=${packages[0]}" >> "$GITHUB_OUTPUT"

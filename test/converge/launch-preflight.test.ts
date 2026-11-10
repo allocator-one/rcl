@@ -17,6 +17,11 @@ describe('guarded launch preflight', () => {
       .toThrow(/missing_provider_credentials.*openai/);
   });
 
+  it('names a failed Harness key fetch in the missing-credentials refusal', () => {
+    expect(() => validateLaunchProviders(['openai'], {}, 'timed out after 12 s on 2 attempts'))
+      .toThrow(/missing_provider_credentials.*openai.*model keys from Harness.*timed out/);
+  });
+
   it('rejects malformed or unsupported local provider endpoints', () => {
     expect(() => validateLaunchProviders(['openai-compat'], { OPENAI_COMPAT_BASE_URL: 'invalid' })).toThrow();
     expect(() => validateLaunchProviders(['openai-compat'], { OPENAI_COMPAT_BASE_URL: 'file:///tmp/model' }))

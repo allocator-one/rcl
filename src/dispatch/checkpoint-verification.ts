@@ -47,7 +47,7 @@ const answerSchema = z.object({ model: text, provider: text, text: z.string(),
 // Validate request-bearing fields here. Finding semantics are independently
 // regenerated from captured source before replay; arbitrary annotations are not
 // authenticated merely by matching this structural schema.
-const requestPlanSchema = z.object({ version: z.union([z.literal(1), z.literal(2)]), findings: z.array(z.unknown()),
+const requestPlanSchema = z.object({ version: z.union([z.literal(1), z.literal(2), z.literal(3)]), findings: z.array(z.unknown()),
   initialGating: z.array(z.unknown()), candidateIndices: z.array(integer), model: text,
   verificationReasoningEffort: VerificationReasoningEffortSchema.optional(),
   verificationTimeoutMs: integer.min(1).max(MAX_TIMER_DELAY_MS),

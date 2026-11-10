@@ -56,7 +56,7 @@ first review:
 | --- | --- | --- |
 | General and specialist reviewers (blocking lane) | `anthropic/claude-opus-5-5`, `openai/gpt-6-sol` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` |
 | Specialist reviewer (secondary lane) | `google/gemini-3.8-flash` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` |
-| Verifier for single-model findings | `openai/gpt-6-astra` | `OPENAI_API_KEY` |
+| Verifier for critical and important findings | `openai/gpt-6-astra` | `OPENAI_API_KEY` |
 | Async bonus reviewer (optional) | `openrouter/moonshotai/kimi-k3` | `OPENROUTER_API_KEY` |
 
 A seat whose key is missing fails; failed blocking-lane seats lower the
@@ -167,6 +167,38 @@ Review a PR, a local diff, or uncommitted work. Pick exactly one source:
 
 Untracked files are invisible to `git diff` and therefore not reviewed.
 
+**Generated files in a PR.** A PR whose diff is mostly a generated, served
+artifact (a bundled OpenAPI spec, help text rendered from it) can exceed the
+64,000-line patch cap. Mark such paths `linguist-generated` in the
+repository-root `.gitattributes` on the PR's **base** branch
+(`spec/infraone.json linguist-generated`) and, for a PR whose full patch is over
+the cap, `rcl review` leaves their patches out of what the council reads. A PR
+that fits is always reviewed whole. A left-out file is not reviewed, so mark
+only artifacts whose content something else checks (a spec compared byte for
+byte against the live API), never lockfiles or code that ships. Only the base
+commit's file counts, so a PR cannot hide its own files by editing
+`.gitattributes`; add the rule in an earlier PR. The base is trusted as far as
+its branch is: a PR into a branch whose `.gitattributes` its author controls (an
+unprotected branch, a stack) is reviewed against that branch's rules, and the PR
+that lands the branch in a protected one is reviewed against the protected
+branch's rules. A left-out file stays in the diff by name, status, line counts
+and git blob id, so `diff_sha256` still changes with its content, and the
+report's `run.target.left_out` records the reason, the commit whose
+`.gitattributes` decided, the count and up to 100 paths. Only a file that
+already existed at its path (modified or deleted) is left out: an added,
+renamed or copied file stays in review, and so does every `.gitattributes`
+file. Only the root file is read: a file below a directory that has its own
+`.gitattributes` at the base stays in review, because a deeper file can override
+the root, and a symlinked `.gitattributes` carries no rules, as in git. The
+base's file list comes from one recursive tree read; a tree GitHub truncates
+fails the review rather than leave nested files unchecked. Plain
+patterns (`*`, `?`, `**`, simple `[…]` sets, anchored or by base name) and the
+set, `=true`, unset and `=false` forms are read. A rule in any other syntax (a
+quoted or negated pattern, a POSIX class such as `[[:digit:]]`) or a line that
+uses a macro defined in the file is not understood and could unset an earlier
+rule, so it counts as "not generated" for the paths it might match. PR targets
+only: patch files and `--staged`/`--working-tree` carry no base to read from.
+
 | Flag | Description |
 | --- | --- |
 | `--staged` / `--working-tree` | Review uncommitted changes instead of a target |
@@ -176,8 +208,8 @@ Untracked files are invisible to `git diff` and therefore not reviewed.
 | `--models <models>` | Comma-separated primary (blocking) models; clears the default secondary and async lists unless those flags are also given |
 | `--secondary-models <models>` | Comma-separated secondary models, used for specialist roles only |
 | `--async-models <models>` | Comma-separated async bonus reviewers, fired with the round and never awaited |
-| `--context <path>` | Context file or directory (repeatable) |
-| `--spec <path>` | Specification file; enables the `spec-compliance` role |
+| `--context <path>` | Context file (repeatable). A directory is not read: an ordinary review warns and skips it, a guarded review refuses to launch |
+| `--spec <path>` | Specification file. It enables the `spec-compliance` role, which sees it in full, and every reviewer gets its first 16 KiB as untrusted task context |
 | `--spec-source <source>` | Where `--spec` came from: `flag`, `repo_file`, or `harness_issue:<ID>` (recorded in the report) |
 | `--post` | Post the review to the pull request; findings that map onto the diff become inline comments |
 | `--json` | Print the JSON report to stdout |
@@ -210,6 +242,7 @@ recovery operations, documented in
 | `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_ROUND` / `RCL_CONVERGE_ATTEMPT`); guarded launches derive these except the explicit recovered-v3 handoff |
 | `--start-over` | Start an explicitly requested fresh review cycle with a new normal budget; preserves prior spending and evidence |
 | `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
+| `--max-slice-minutes <n>` | Guarded launch only: start no new reviewer call after N minutes; running calls finish, then exit 5. Rerunning the same command resumes the journaled council under the same attempt |
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed, unknown or inconclusive launch; preserves spent attempts |
 | `--retry-report <path>` | Bind an original legacy (4.1.10–4.1.12) report to an inconclusive retry; requires `--retry-reason` |
 | `--launch-intent <intent>` | `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
@@ -218,13 +251,14 @@ recovery operations, documented in
 | `--expect-base-sha <sha>` | With `--export-pending-package` only: require the resolved current base to equal this SHA |
 | `--preview-pending` | Authenticate a pending recovery or preview a package export without writes or provider calls |
 | `--ordinary-pending-package <path>` | Immutable pending-launch package for `--resume-pending` or `--finalize-pending-only`; cycle packages are finalize-only |
-| `--resume-pending` / `--resume-async-sha256 <hashes>` | Finalize a dead pending launch and claim one checkpointed retry, retaining the exact async results; cycle recovery accepts `none` for no completed async artifacts |
+| `--resume-pending` / `--resume-async-sha256 <hashes>` | Finalize a dead pending launch and claim one checkpointed retry, retaining the exact async results; cycle recovery, or an ordinary package whose council had no async seats, accepts `none` |
 | `--finalize-pending-only` / `--pending-native-sha256 <digest>` / `--pending-attempt-sha256 <digest>` | Finalize the previewed pending attempt as failed/unknown without claiming a successor; cycle recovery after PR movement also requires `--for-pr`, `--expect-pr-head-sha`, and the returned `--pending-preview-sha256` |
 
 **Reports.** Every report carries a `run` header: a client run id (UUIDv7),
-the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub
-for PRs, from `git rev-parse HEAD` and the merge-base with the remote default
-branch for `--staged`/`--working-tree`, from `--head-sha`/`--base-sha` for
+the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub's
+PR head and comparison merge base for PRs; from `git rev-parse HEAD` and the
+merge base with the remote default branch for `--staged`/`--working-tree`; from
+`--head-sha`/`--base-sha` for
 patch files) and a `diff_sha256`, the roster with each seat's lane
 (`blocking`, `secondary`, `async`, `verification`), a config digest with
 thresholds and gating inline, spec and context-file digests, a best-effort
@@ -254,6 +288,7 @@ completion lines, so a long queue is distinguishable from a hung process.
 | 2 | Guarded convergence only: the attempt or round cap is exhausted; continuing needs an explicitly approved higher cap |
 | 3 | Guarded convergence only: native attempt or round state could not be read or written |
 | 4 | `--evidence-required` (implied by `--attest`): the review completed but Harness did not acknowledge the evidence |
+| 5 | Guarded convergence only: the council reached `--max-slice-minutes` before it could close; its calls are journaled and rerunning the same command resumes it without a new attempt |
 
 When `--ci` fails and evidence delivery also failed, the exit code is 1 and the
 evidence failure is printed beside the gate verdict. A run that starts or
@@ -269,8 +304,8 @@ with evidence required.
 critical or important finding gates when at least two distinct models raised it
 (`gating.minModels`), when it is critical, or when the verifier confirmed it
 with source evidence; its `gating.reason` is then `consensus`, `critical` or
-`verified`. A refuted or unverifiable single-model claim (`gating.reason:
-none`) is reported but does not fail CI. In `all-findings` mode every critical
+`verified`. A refuted claim, or an unverifiable single-model one
+(`gating.reason: none`), is reported but does not fail CI. In `all-findings` mode every critical
 or important finding fails CI. Findings in the below-threshold appendix never
 count. See [How consensus and gating work](#how-consensus-and-gating-work).
 
@@ -283,7 +318,7 @@ rcl review owner/repo#7 \
   --reviewer openai/gpt-6-sol:bug-hunter
 
 # Spec compliance review with context
-rcl review ./feature.patch --role spec-compliance --spec SPEC.md --context src/
+rcl review ./feature.patch --role spec-compliance --spec SPEC.md --context src/auth.ts
 
 # JSON for downstream processing
 rcl review owner/repo#99 --json > findings.json
@@ -422,11 +457,11 @@ and the recovery runbooks are in
 | `rcl evidence recover-run` | Preview, apply or resume delivery of one original asserted run |
 | `rcl evidence recover-claim` | Preview, apply, resume, adopt or refresh one selected semantic claim on its existing native target |
 | `rcl evidence recover-finding` | Preview or submit a correction of one recorded finding identity |
-| `rcl evidence retriage-finding` | Preview or submit a fresh dismissal of one finding at its recorded severity |
+| `rcl evidence retriage-finding` | Preview or submit a fresh dismissal of one finding at its recorded severity; a gating finding's reason must quote the code it cites |
 | `rcl telemetry status` | Telemetry level, credential source and spooled deliveries |
 | `rcl telemetry flush [--run <id>]` | Deliver spooled evidence |
 | `rcl telemetry rejected` | Inspect retained rejected evidence without delivering it |
-| `rcl telemetry recover-reviewer --target <t> --run <id>` | Redeliver one exact retained terminal reviewer report without restarting reviewers or verification |
+| `rcl telemetry recover-reviewer --preview\|--apply\|--resume --manifest <path>` | Preview or execute one pinned retained reviewer activation; mode-less target/run remains available only when no private outbox exists |
 | `rcl telemetry backfill` | Post recovered pre-3.0 reports and ledgers as backfill evidence |
 | `rcl telemetry recover-refutations` | Discover original verifier explanations and write a reviewed recovery manifest |
 
@@ -439,10 +474,13 @@ commands are documented in
 | Command | Purpose |
 | --- | --- |
 | `rcl converge-report` | Dedupe a round report against earlier rounds, enforce the round cap, classify findings (`new` / `repeat` / `suppressed` / `regating`); refuses inconclusive reviewer health |
-| `rcl converge-verdict` | Record fixed/dismissed verdicts and report the round's resolution |
+| `rcl converge-verdict` | Record fixed/dismissed verdicts and report the round's resolution; a gating dismissal must quote the code it cites (`path:line` then the code in backticks), checked against the reviewed commit |
 | `rcl converge-reconcile-history` | Authenticate and append a reconciliation receipt for an exact historical guarded launch after `lastLaunch` advanced |
 | `rcl converge-stale` | Audited disposition of a healthy or reconciled delivered-hard-failure report that became stale before admission |
 | `rcl converge-gap` | Audited record of one evidenced missing terminal report |
+| `rcl converge-close-fresh` | Audited close of a fresh-review operation whose launch died before writing any report |
+| `rcl converge-status` | Report whether the latest round is launching, running, dead, not launched or finished, without changing state; exit 6 when nothing will finish it (`--wait` polls until it does or dies) |
+| `rcl pr-snapshot` | Capture a pull request's live state for a review process that holds no GitHub credentials (`rcl review --pr-snapshot`) |
 | `rcl converge-rejected` | Audited disposition of a report rejected locally before delivery |
 | `rcl converge-attempt` | Claim one durable attempt; recovered-v3 continuation hands the exact claim to its guarded producer with `--attempt` |
 
@@ -523,7 +561,7 @@ gating:
   minModels: 2                    # distinct models for consensus gating
   verificationModel: openai/gpt-6-astra  # direct-API models only
   verificationReasoningEffort: high      # OpenAI verifier only; separate from reviewer effort
-  verificationPassTimeout: 600000        # ms for the complete verification queue
+  verificationPassTimeout: 600000        # ms for up to two waves of verifier batches; scales with more
 
 output:
   belowThresholdAppendix: true  # false drops below-threshold findings outright
@@ -633,10 +671,15 @@ cannot verify. Astra defaults to `high` effort;
 or `max` for an OpenAI verifier only (other verifiers keep their provider
 defaults and reject the setting), and is recorded in the report header and
 retained verification plan. The whole verification pass has a 10-minute
-default deadline (`gating.verificationPassTimeout`) across all queued verifier
-batches; verifier calls default to the remaining pass budget, and the optional
-`gating.verificationTimeout` (milliseconds) imposes a shorter per-call limit,
-still capped by the remaining pass deadline.
+default deadline (`gating.verificationPassTimeout`). It covers up to two waves
+of verifier batches (three batches of eight candidates run at a time); a
+larger review's deadline grows in proportion to its waves, up to four times
+the configured one, and the report records the bound it applied as
+`run.gating.verification_pass_effective_timeout_ms`. Verifier calls default to
+the remaining pass budget, and the optional `gating.verificationTimeout`
+(milliseconds) imposes a shorter per-call limit, still capped by the
+remaining pass deadline. A pass that overruns its deadline falls back to
+strict severity gating for the round.
 
 ---
 
@@ -654,6 +697,7 @@ still capped by the remaining pass deadline.
 | `GITHUB_TOKEN` | GitHub token for PR fetch and `--post` |
 | `XDG_CONFIG_HOME` | Where the `harness login` credential is read from (`$XDG_CONFIG_HOME/harness/credentials.json`; default `~/.config/harness/credentials.json`) |
 | `RCL_DATA_DIR` | Per-machine state directory (model stats, evidence outbox and quarantine); default `~/.rcl` |
+| `HOME` | Not required: `~` above falls back to the account's home in the password database |
 | `RCL_TELEMETRY` | `off` keeps every review on the machine |
 | `RCL_NO_HARNESS_KEYS` | Any value disables provider-key distribution via Harness |
 | `RCL_FOR_PR` | Same as `--for-pr`, for patch-file reviews |
@@ -708,10 +752,16 @@ each gets a `gating.reason`:
 
 | `gating.reason` | When |
 | --- | --- |
-| `consensus` | Raised by at least `gating.minModels` (default 2) distinct models; model weights can demote consensus but never replace distinct models |
-| `critical` | Critical severity |
+| `consensus` | Raised by at least `gating.minModels` (default 2) distinct models and not refuted by the verifier; model weights can demote consensus but never replace distinct models |
+| `critical` | Critical severity and not refuted by the verifier |
 | `verified` | A single-model important finding the verifier confirmed with source evidence |
-| `none` | Everything else, including refuted, insufficient-evidence and unverified (`unavailable`) claims; still reported, never blocking |
+| `none` | Everything else, including refuted claims and single-model claims with insufficient evidence or no verification (`unavailable`); still reported, never blocking |
+
+The verifier checks every critical and important finding against the change
+and the task context: the `--spec` text and, for a pull request, its title and
+description. A refutation removes any tier. Any other verdict leaves a
+`consensus` or `critical` finding gating, so a verifier outage never opens the
+gate. Each finding records its verdict in `gating.verification`.
 
 `gating.mode: all-findings` restores the legacy rule where every critical or
 important finding gates. For the full scoring algorithm, see
