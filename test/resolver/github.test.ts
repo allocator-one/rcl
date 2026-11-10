@@ -34,34 +34,59 @@ function changedFile(i: number) {
 
 const files = (n: number) => Array.from({ length: n }, (_, i) => changedFile(i));
 
-/** An Octokit fake: compare serves `compareFiles` on one response; the PR listing serves `listed`. */
-type ContentsFixture = string | { type: string };
+/** A `.gitattributes` in the fake repository: its text, or a symlink (git mode 120000). */
+type AttributesFixture = string | { symlink: true };
 
-/** What the contents API answers for a file: JSON with base64 content. */
-function contentsOf(fixture: ContentsFixture) {
-  if (typeof fixture !== 'string') return fixture;
-  const content = Buffer.from(fixture, 'utf8');
-  return { type: 'file', encoding: 'base64', size: content.length, content: content.toString('base64') };
-}
+const attributesSha = (path: string, ref: string) => `${Buffer.from(`${ref}:${path}`).toString('hex')}`.padEnd(40, '0').slice(0, 40);
 
-function octokitWith(opts: { pr?: ReturnType<typeof fakePr>; recheck?: ReturnType<typeof fakePr>; compareFiles?: number; listed?: number; attributes?: ContentsFixture; nested?: Record<string, ContentsFixture>; getContentError?: unknown }) {
+/**
+ * An Octokit fake: compare serves `compareFiles` on one response; the PR listing serves `listed`;
+ * the git tree and blob endpoints serve the `.gitattributes` fixtures of the base (and, to prove it
+ * is never read, of the head).
+ */
+function octokitWith(opts: {
+  pr?: ReturnType<typeof fakePr>; recheck?: ReturnType<typeof fakePr>; compareFiles?: number; listed?: number;
+  attributes?: AttributesFixture; nested?: Record<string, AttributesFixture>; headAttributes?: string;
+  treeTruncated?: boolean; getContentError?: unknown;
+}) {
   const pr = opts.pr ?? fakePr();
   const get = vi.fn().mockResolvedValueOnce(pr).mockResolvedValueOnce(opts.recheck ?? pr);
   const compare = vi.fn(async () => ({ data: { files: files(opts.compareFiles ?? pr.data.changed_files) } }));
   const paginate = vi.fn(async () => files(opts.listed ?? pr.data.changed_files));
-  // Without attributes the base has no .gitattributes, which GitHub reports as a 404.
-  const getContent = vi.fn(async (request: { path: string }) => {
+  const fixturesAt = (ref: string): Record<string, AttributesFixture> => {
+    if (ref === pr.data.head.sha) return opts.headAttributes === undefined ? {} : { '.gitattributes': opts.headAttributes };
+    return { ...(opts.attributes === undefined ? {} : { '.gitattributes': opts.attributes }), ...opts.nested };
+  };
+  const getTree = vi.fn(async (request: { tree_sha: string }) => {
     if (opts.getContentError) throw opts.getContentError;
-    const text = request.path === '.gitattributes' ? opts.attributes : opts.nested?.[request.path];
-    if (text === undefined) throw Object.assign(new Error('Not Found'), { status: 404 });
-    return { data: contentsOf(text) };
+    const tree = [
+      { path: 'src', type: 'tree', mode: '040000', sha: 'c'.repeat(40) },
+      { path: 'src/file-1.ts', type: 'blob', mode: '100644', sha: 'd'.repeat(40), size: 10 },
+      ...Object.entries(fixturesAt(request.tree_sha)).map(([path, fixture]) => ({
+        path, type: 'blob', sha: attributesSha(path, request.tree_sha),
+        mode: typeof fixture === 'string' ? '100644' : '120000',
+        size: typeof fixture === 'string' ? Buffer.byteLength(fixture, 'utf8') : 10,
+      })),
+    ];
+    return { data: { sha: request.tree_sha, truncated: opts.treeTruncated ?? false, tree } };
+  });
+  const getBlob = vi.fn(async (request: { file_sha: string }) => {
+    for (const ref of [pr.data.base.sha, pr.data.head.sha]) {
+      for (const [path, fixture] of Object.entries(fixturesAt(ref))) {
+        if (attributesSha(path, ref) !== request.file_sha || typeof fixture !== 'string') continue;
+        const content = Buffer.from(fixture, 'utf8');
+        return { data: { encoding: 'base64', size: content.length, content: content.toString('base64') } };
+      }
+    }
+    throw Object.assign(new Error('Not Found'), { status: 404 });
   });
   const octokit = {
     pulls: { get, listFiles: { endpoint: 'pulls.listFiles' } },
-    repos: { compareCommitsWithBasehead: compare, getContent },
+    repos: { compareCommitsWithBasehead: compare },
+    git: { getTree, getBlob },
     paginate,
   } as unknown as Octokit;
-  return { octokit, get, compare, paginate, getContent };
+  return { octokit, get, compare, paginate, getTree, getBlob };
 }
 
 describe('parseGitHubTarget', () => {
@@ -263,21 +288,22 @@ describe('generated paths declared by the base .gitattributes (RCL-209)', () => 
   const attributes = 'spec/infraone.json linguist-generated\ndocs/infraone/** linguist-generated\n';
   // The served-spec shape: one generated file alone is over the 64,000-line patch cap.
   const hugePatch = `@@ -1 +1,70000 @@\n-x\n${Array.from({ length: 70_000 }, (_, i) => `+line ${i}`).join('\n')}\n`;
+  const spec = (blobSha: string, patch = hugePatch) =>
+    ({ filename: 'spec/infraone.json', status: 'modified', additions: 70_000, deletions: 1, patch, sha: blobSha });
 
-  function release(blobSha: string, extra: { attributes?: ContentsFixture; nested?: Record<string, ContentsFixture>; getContentError?: unknown } = {}) {
+  function release(blobSha: string, extra: Parameters<typeof octokitWith>[0] = {}) {
     const pr = fakePr(2); pr.data.base.sha = base; pr.data.head.sha = head;
-    const f = octokitWith({ pr, attributes: extra.attributes, nested: extra.nested, getContentError: extra.getContentError });
-    f.compare.mockResolvedValue({ data: { files: [
-      changedFile(1),
-      { filename: 'spec/infraone.json', status: 'modified', additions: 70_000, deletions: 1, patch: hugePatch, sha: blobSha },
-    ] } } as any);
+    const f = octokitWith({ ...extra, pr });
+    f.compare.mockResolvedValue({ data: { files: [changedFile(1), spec(blobSha)] } } as any);
     return f;
   }
 
   it('reads the attributes at the base commit, never the head', async () => {
     const f = release('1'.repeat(40), { attributes });
     await fetchPRDiff(target, undefined, f.octokit);
-    expect(f.getContent).toHaveBeenCalledWith(expect.objectContaining({ path: '.gitattributes', ref: base }));
+    expect(f.getTree).toHaveBeenCalledOnce();
+    expect(f.getTree).toHaveBeenCalledWith(expect.objectContaining({ tree_sha: base, recursive: 'true' }));
+    expect(f.getBlob).toHaveBeenCalledOnce();
   });
 
   it('leaves the generated patch out so an over-cap PR can be chunked, and says so in the metadata', async () => {
@@ -301,77 +327,39 @@ describe('generated paths declared by the base .gitattributes (RCL-209)', () => 
     expect(diffDigest(other.files)).not.toBe(diffDigest(one.files));
   });
 
+  it('leaves nothing out, and reads no attributes, while the full patch fits the review', async () => {
+    const f = release('1'.repeat(40), { attributes });
+    f.compare.mockResolvedValue({ data: { files: [changedFile(1), spec('1'.repeat(40), '@@ -1 +1,2 @@\n-a\n+b\n+c\n')] } } as any);
+    const diff = await fetchPRDiff(target, undefined, f.octokit);
+    expect(diff.metadata?.leftOut).toBeUndefined();
+    expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toContain('+c');
+    expect(f.getTree).not.toHaveBeenCalled();
+    expect(f.getBlob).not.toHaveBeenCalled();
+  });
+
   it('keeps a file in review when a base .gitattributes in one of its directories could change its attributes', async () => {
     const f = release('1'.repeat(40), { attributes, nested: { 'spec/.gitattributes': 'infraone.json -linguist-generated\n' } });
     const diff = await fetchPRDiff(target, undefined, f.octokit);
     expect(diff.metadata?.leftOut).toBeUndefined();
     expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toBe(hugePatch);
-    expect(f.getContent).toHaveBeenCalledWith(expect.objectContaining({ path: 'spec/.gitattributes', ref: base }));
+    expect(f.getBlob).toHaveBeenCalledOnce(); // the root file only; a nested one is never read, only its presence counts
   });
 
-  it('checks the directories of the left-out files only, once each', async () => {
-    const f = release('1'.repeat(40), { attributes });
-    await fetchPRDiff(target, undefined, f.octokit);
-    expect(f.getContent.mock.calls.map(([request]) => request.path).sort()).toEqual(['.gitattributes', 'spec/.gitattributes']);
+  it('keeps a file in review below a symlinked .gitattributes too, and ignores a symlinked root one as git does', async () => {
+    const nested = await fetchPRDiff(target, undefined,
+      release('1'.repeat(40), { attributes, nested: { 'spec/.gitattributes': { symlink: true } } }).octokit);
+    expect(nested.metadata?.leftOut).toBeUndefined();
+
+    const f = release('1'.repeat(40), { attributes: { symlink: true } });
+    const root = await fetchPRDiff(target, undefined, f.octokit);
+    expect(root.metadata?.leftOut).toBeUndefined();
+    expect(root.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toBe(hugePatch);
+    expect(f.getBlob).not.toHaveBeenCalled();
   });
 
-  it('does not look inside a directory below one that already blocks its files', async () => {
-    const f = release('1'.repeat(40), { attributes: 'spec/** linguist-generated\n', nested: { 'spec/.gitattributes': '*.md text\n' } });
-    f.compare.mockResolvedValue({ data: { files: [
-      changedFile(1),
-      { filename: 'spec/deep/er/api.json', status: 'modified', additions: 70_000, deletions: 1, patch: hugePatch, sha: '1'.repeat(40) },
-    ] } } as any);
-    const diff = await fetchPRDiff(target, undefined, f.octokit);
-    expect(diff.metadata?.leftOut).toBeUndefined();
-    expect(f.getContent.mock.calls.map(([request]) => request.path).sort()).toEqual(['.gitattributes', 'spec/.gitattributes']);
-  });
-
-  it('leaves nothing out, and reads no attributes, while the full patch fits the review', async () => {
-    const f = release('1'.repeat(40), { attributes });
-    f.compare.mockResolvedValue({ data: { files: [
-      changedFile(1),
-      { filename: 'spec/infraone.json', status: 'modified', additions: 2, deletions: 1, patch: '@@ -1 +1,2 @@\n-a\n+b\n+c\n', sha: '1'.repeat(40) },
-    ] } } as any);
-    const diff = await fetchPRDiff(target, undefined, f.octokit);
-    expect(diff.metadata?.leftOut).toBeUndefined();
-    expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toContain('+c');
-    expect(f.getContent).not.toHaveBeenCalled();
-  });
-
-  it('ignores a .gitattributes that is a symlink, as git does, and keeps the file in review', async () => {
-    const f = release('1'.repeat(40), { attributes: { type: 'symlink' } });
-    const diff = await fetchPRDiff(target, undefined, f.octokit);
-    expect(diff.metadata?.leftOut).toBeUndefined();
-    expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toBe(hugePatch);
-  });
-
-  it('keeps a file in review when a directory above it holds a symlinked .gitattributes', async () => {
-    const f = release('1'.repeat(40), { attributes, nested: { 'spec/.gitattributes': { type: 'symlink' } } });
-    const diff = await fetchPRDiff(target, undefined, f.octokit);
-    expect(diff.metadata?.leftOut).toBeUndefined();
-  });
-
-  it('reads the attributes through the real Octokit response handling', async () => {
-    const { Octokit } = await import('@octokit/rest');
-    const pr = fakePr(2); pr.data.base.sha = base; pr.data.head.sha = head;
-    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
-    const paths: string[] = [];
-    const octokit = new Octokit({ request: { fetch: async (input: string | URL | Request) => {
-      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
-      paths.push(url.pathname);
-      if (url.pathname.endsWith('/contents/.gitattributes')) {
-        const content = Buffer.from(attributes, 'utf8');
-        return json({ type: 'file', encoding: 'base64', size: content.length, content: content.toString('base64') });
-      }
-      if (url.pathname.includes('/contents/')) return new Response('{"message":"Not Found"}', { status: 404, headers: { 'content-type': 'application/json' } });
-      if (url.pathname.includes('/compare/')) {
-        return json({ files: [changedFile(1), { filename: 'spec/infraone.json', status: 'modified', additions: 70_000, deletions: 1, patch: hugePatch, sha: '1'.repeat(40) }] });
-      }
-      return json(pr.data);
-    } } });
-    const diff = await fetchPRDiff(target, undefined, octokit);
-    expect(diff.metadata?.leftOut?.paths).toEqual(['spec/infraone.json']);
-    expect(paths.some((path) => decodeURIComponent(path).endsWith('/contents/spec/.gitattributes'))).toBe(true);
+  it('fails the review when the repository tree is too large to list, rather than guess at nested attributes', async () => {
+    const f = release('1'.repeat(40), { attributes, treeTruncated: true });
+    await expect(fetchPRDiff(target, undefined, f.octokit)).rejects.toThrow(/too large to list/);
   });
 
   it('records the left-out paths in the run header target', async () => {
@@ -388,15 +376,43 @@ describe('generated paths declared by the base .gitattributes (RCL-209)', () => 
   });
 
   it('does not let the PR declare its own files generated: a head-only .gitattributes changes nothing', async () => {
-    // The base has no .gitattributes (404); the PR adds one. Only the base is read.
-    const f = release('1'.repeat(40));
+    // The base has no .gitattributes; the head carries one that would leave the spec out. Only the base is read.
+    const f = release('1'.repeat(40), { headAttributes: attributes });
     const diff = await fetchPRDiff(target, undefined, f.octokit);
     expect(diff.metadata?.leftOut).toBeUndefined();
     expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toBe(hugePatch);
+    expect(f.getTree.mock.calls.every(([request]) => request.tree_sha === base)).toBe(true);
+    expect(f.getBlob).not.toHaveBeenCalled();
   });
 
   it('fails the review when the attributes cannot be read, rather than reviewing a different patch', async () => {
     const f = release('1'.repeat(40), { getContentError: Object.assign(new Error('rate limited'), { status: 403 }) });
     await expect(fetchPRDiff(target, undefined, f.octokit)).rejects.toThrow('rate limited');
+  });
+
+  it('reads the attributes through the real Octokit response handling', async () => {
+    const { Octokit } = await import('@octokit/rest');
+    const pr = fakePr(2); pr.data.base.sha = base; pr.data.head.sha = head;
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
+    const paths: string[] = [];
+    const octokit = new Octokit({ request: { fetch: async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      paths.push(decodeURIComponent(url.pathname));
+      if (url.pathname.includes('/git/trees/')) {
+        return json({ sha: base, truncated: false, tree: [
+          { path: 'spec', type: 'tree', mode: '040000', sha: 'c'.repeat(40) },
+          { path: '.gitattributes', type: 'blob', mode: '100644', sha: 'e'.repeat(40), size: attributes.length },
+          { path: 'docs/.gitattributes', type: 'blob', mode: '100644', sha: 'f'.repeat(40), size: 5 },
+        ] });
+      }
+      if (url.pathname.includes('/git/blobs/')) {
+        return json({ encoding: 'base64', size: attributes.length, content: Buffer.from(attributes, 'utf8').toString('base64') });
+      }
+      if (url.pathname.includes('/compare/')) return json({ files: [changedFile(1), spec('1'.repeat(40))] });
+      return json(pr.data);
+    } } });
+    const diff = await fetchPRDiff(target, undefined, octokit);
+    expect(diff.metadata?.leftOut?.paths).toEqual(['spec/infraone.json']);
+    expect(paths.some((path) => path.endsWith(`/git/trees/${base}`))).toBe(true);
   });
 });

@@ -51,6 +51,7 @@ describe('generatedPathMatcher', () => {
   it('keeps a path in review when an unsupported later rule could unset it', () => {
     const macro = '[attr]hand -linguist-generated\n*.json linguist-generated\nspec/keep.json hand\n';
     expect(matches(macro, 'spec/keep.json')).toBe(false);
+    expect(matches('[attr] hand -linguist-generated\n*.json linguist-generated\nspec/keep.json hand\n', 'spec/keep.json')).toBe(false);
     expect(matches(macro, 'spec/other.json')).toBe(true);
     const quoted = '*.json linguist-generated\n"my file.json" -linguist-generated\n*.md linguist-generated\n';
     expect(matches(quoted, 'my file.json')).toBe(false);

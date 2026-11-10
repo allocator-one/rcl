@@ -189,7 +189,9 @@ already existed at its path (modified or deleted) is left out: an added,
 renamed or copied file stays in review, and so does every `.gitattributes`
 file. Only the root file is read: a file below a directory that has its own
 `.gitattributes` at the base stays in review, because a deeper file can override
-the root. A symlinked `.gitattributes` carries no rules, as in git. Plain
+the root, and a symlinked `.gitattributes` carries no rules, as in git. The
+base's file list comes from one recursive tree read; a tree GitHub truncates
+fails the review rather than leave nested files unchecked. Plain
 patterns (`*`, `?`, `**`, simple `[…]` sets, anchored or by base name) and the
 set, `=true`, unset and `=false` forms are read. A rule in any other syntax (a
 quoted or negated pattern, a POSIX class such as `[[:digit:]]`) or a line that

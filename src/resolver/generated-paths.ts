@@ -105,7 +105,7 @@ function attributeName(token: string): string {
 export function generatedPathMatcher(attributesText: string): (path: string) => boolean {
   const lines = attributesText.split(/\r?\n/).map((rawLine) => rawLine.trim()).filter((line) => line.length > 0 && !line.startsWith('#'));
   const macros = new Set(
-    lines.filter((line) => line.startsWith('[attr]')).map((line) => line.slice('[attr]'.length).split(/\s+/)[0]!)
+    lines.filter((line) => line.startsWith('[attr]')).map((line) => line.slice('[attr]'.length).trim().split(/\s+/)[0]!)
   );
   const rules: Array<{ matches: RegExp; verdict: Verdict }> = [];
   for (const line of lines) {
@@ -144,7 +144,7 @@ function isAttributesFile(path: string): boolean {
 const LEFT_OUT_STATUSES: ReadonlySet<string> = new Set(['modified', 'deleted', 'removed']);
 
 /** The files `leaveOutGenerated` would blank, before any directory-level exception. */
-export function leaveOutCandidates(files: readonly FileChange[], isGenerated: (path: string) => boolean): FileChange[] {
+function leaveOutCandidates(files: readonly FileChange[], isGenerated: (path: string) => boolean): FileChange[] {
   return files.filter((file) =>
     file.patch.length > 0 &&
     file.blobSha !== undefined &&

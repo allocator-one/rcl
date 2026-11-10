@@ -3,7 +3,7 @@ import { sourceExceedsReviewCapacity } from '../prepare/chunker.js';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
 import { createGitHubClient, getGitHubPullRequest } from './github-client.js';
-import { ancestorDirectories, generatedPathMatcher, leaveOutCandidates, leaveOutGenerated } from './generated-paths.js';
+import { ancestorDirectories, generatedPathMatcher, leaveOutGenerated } from './generated-paths.js';
 
 export interface GitHubTarget {
   owner: string;
@@ -170,57 +170,47 @@ async function fetchChangedFiles(
 // file, and reading it whole would only hide a problem.
 const MAX_ATTRIBUTES_BYTES = 1024 * 1024;
 
-// Directories whose own .gitattributes is looked up before a file is left out.
-// A file under a directory beyond this bound stays in review.
-const MAX_DIRECTORY_LOOKUPS = 100;
+const ATTRIBUTES_FILE = '.gitattributes';
 
-/**
- * The `.gitattributes` at one path and commit, or `undefined` when the commit
- * has none there. Any other failure propagates: a review that silently fell
- * back to "nothing is generated" would read a different patch, and bind a
- * different digest, than the same review on a healthy API. A symlink reads as
- * an empty file: git ignores a symlinked `.gitattributes`, so it carries no
- * rules, yet the path is occupied.
- */
-async function readAttributes(octokit: Octokit, target: GitHubTarget, ref: string, path: string): Promise<string | undefined> {
-  try {
-    const { data } = await octokit.repos.getContent({ owner: target.owner, repo: target.repo, path, ref });
-    if (Array.isArray(data)) throw new Error(`${path} at ${ref} is a directory.`);
-    if (data.type === 'symlink') return '';
-    if (data.type !== 'file' || !('content' in data) || data.encoding !== 'base64') {
-      throw new Error(`${path} at ${ref} is not a regular file.`);
-    }
-    if (data.size > MAX_ATTRIBUTES_BYTES) {
-      throw new Error(`${path} at ${ref} exceeds ${MAX_ATTRIBUTES_BYTES.toLocaleString('en-US')} bytes.`);
-    }
-    return Buffer.from(data.content, 'base64').toString('utf8');
-  } catch (err) {
-    if ((err as { status?: number }).status === 404) return undefined;
-    throw err;
-  }
+interface AttributesPolicy {
+  /** The root file's text; `''` for a symlink (git ignores it), `undefined` when the commit has none. */
+  root: string | undefined;
+  /** Directories below the root that hold their own `.gitattributes`, whatever its kind. */
+  directories: Set<string>;
 }
 
 /**
- * The directories, among those above `paths`, that hold their own
- * `.gitattributes` at the commit, plus any beyond the lookup bound. Git lets a
- * deeper file override the root, and the root reader does not apply it, so a
- * file below such a directory is never left out.
+ * The `.gitattributes` files of one commit, from one recursive tree listing.
+ * The tree, unlike the contents API, reports each entry's git mode, so a
+ * symlinked file is known as one (the contents API answers a symlink to a
+ * file with that file's content). Git lets a deeper file override the root
+ * and the root reader does not apply it, so a file below any directory listed
+ * here is never left out. Any failure propagates, and so does a listing GitHub
+ * truncated: a review that silently fell back to "nothing is generated" would
+ * read a different patch, and bind a different digest, than the same review on
+ * a healthy API.
  */
-async function directoriesWithAttributes(octokit: Octokit, target: GitHubTarget, ref: string, paths: readonly string[]): Promise<Set<string>> {
-  const directories = [...new Set(paths.flatMap(ancestorDirectories))].sort();
-  const blocked = new Set<string>();
-  let lookups = 0;
-  for (const directory of directories) {
-    // Sorted, so an ancestor is decided first; below a blocked one nothing is left out anyway.
-    if (ancestorDirectories(directory).some((ancestor) => blocked.has(ancestor))) continue;
-    if (lookups >= MAX_DIRECTORY_LOOKUPS) {
-      blocked.add(directory);
-      continue;
-    }
-    lookups += 1;
-    if (await readAttributes(octokit, target, ref, `${directory}/.gitattributes`) !== undefined) blocked.add(directory);
+async function readAttributesPolicy(octokit: Octokit, target: GitHubTarget, ref: string): Promise<AttributesPolicy> {
+  const { data } = await octokit.git.getTree({ owner: target.owner, repo: target.repo, tree_sha: ref, recursive: 'true' });
+  if (data.truncated) {
+    throw new Error(`The tree of ${ref} is too large to list, so its ${ATTRIBUTES_FILE} files cannot be checked.`);
   }
-  return blocked;
+  const entries = data.tree.filter((entry) =>
+    entry.type === 'blob' && entry.path !== undefined && (entry.path === ATTRIBUTES_FILE || entry.path.endsWith(`/${ATTRIBUTES_FILE}`))
+  );
+  const directories = new Set(
+    entries.filter((entry) => entry.path !== ATTRIBUTES_FILE).map((entry) => entry.path!.slice(0, -ATTRIBUTES_FILE.length - 1))
+  );
+  const root = entries.find((entry) => entry.path === ATTRIBUTES_FILE);
+  if (root === undefined) return { root: undefined, directories };
+  if (root.mode === '120000') return { root: '', directories };
+  if ((root.size ?? 0) > MAX_ATTRIBUTES_BYTES) {
+    throw new Error(`${ATTRIBUTES_FILE} at ${ref} exceeds ${MAX_ATTRIBUTES_BYTES.toLocaleString('en-US')} bytes.`);
+  }
+  if (root.sha === undefined) throw new Error(`${ATTRIBUTES_FILE} at ${ref} has no blob id.`);
+  const { data: blob } = await octokit.git.getBlob({ owner: target.owner, repo: target.repo, file_sha: root.sha });
+  if (blob.encoding !== 'base64') throw new Error(`${ATTRIBUTES_FILE} at ${ref} is not base64 encoded.`);
+  return { root: Buffer.from(blob.content, 'base64').toString('utf8'), directories };
 }
 
 export async function fetchPRDiff(
@@ -272,17 +262,14 @@ export async function fetchPRDiff(
   // the head — is the authority: a PR cannot switch review off for its own
   // files by editing .gitattributes, and that edit is itself reviewed.
   let leftOutResult: ReturnType<typeof leaveOutGenerated> = { files: changes };
-  const attributes = sourceExceedsReviewCapacity(changes)
-    ? await readAttributes(octokit, target, pr.base.sha, '.gitattributes')
+  const policy = sourceExceedsReviewCapacity(changes)
+    ? await readAttributesPolicy(octokit, target, pr.base.sha)
     : undefined;
-  if (attributes !== undefined) {
-    const isGenerated = generatedPathMatcher(attributes);
-    const blocked = await directoriesWithAttributes(
-      octokit, target, pr.base.sha, leaveOutCandidates(changes, isGenerated).map((f) => f.filename)
-    );
+  if (policy?.root !== undefined) {
+    const isGenerated = generatedPathMatcher(policy.root);
     leftOutResult = leaveOutGenerated(
       changes,
-      (path) => isGenerated(path) && !ancestorDirectories(path).some((directory) => blocked.has(directory)),
+      (path) => isGenerated(path) && !ancestorDirectories(path).some((directory) => policy.directories.has(directory)),
       pr.base.sha
     );
   }

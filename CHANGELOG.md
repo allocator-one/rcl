@@ -14,7 +14,8 @@
   `run.target.left_out` records the reason, the commit, the count and up to 100
   paths. Only a modified or deleted file is left out (an added or renamed one
   stays reviewed), and so is any file below a directory with its own
-  `.gitattributes` or under a rule the reader does not understand. A
+  `.gitattributes` (found in one recursive tree read; a truncated tree fails
+  the review) or under a rule the reader does not understand. A
   `.gitattributes` the API cannot read fails the review instead of silently
   reviewing a different patch.
 
