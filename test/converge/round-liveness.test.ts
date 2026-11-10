@@ -8,6 +8,7 @@ import { convergeAttemptStatePath } from '../../src/converge/attempt-budget.js';
 import { guardReviewLaunch, ReviewCouncilInterrupted, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
 import { convergeRunStatePath } from '../../src/converge/run-state.js';
 import { inspectRoundLiveness, waitForRoundOutcome } from '../../src/converge/round-liveness.js';
+import { withNativeTarget } from '../../src/converge/target-ownership.js';
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -61,6 +62,21 @@ function runningLaunch(options: GuardedLaunchOptions) {
 }
 
 describe('converge round liveness (RCL-232)', () => {
+  it('keeps waiting during accepted preflight before the first round registers', async () => {
+    const options = await launchOptions();
+    await withNativeTarget(options.gitCommonDir, target, async () => {
+      let time = 0;
+      const sleep = vi.fn(async (ms: number) => { time += ms; });
+      const status = await waitForRoundOutcome({ gitCommonDir: options.gitCommonDir, target, headSha,
+        lockTimeoutMs: 50, timeoutMs: 100, intervalMs: 100, sleep, now: () => time });
+      expect(status).toMatchObject({ status: 'launching', action: 'wait' });
+      expect(status.launch).toBeUndefined();
+      expect(sleep).toHaveBeenCalledTimes(1);
+    });
+    expect(await inspectRoundLiveness({ gitCommonDir: options.gitCommonDir, target, headSha }))
+      .toMatchObject({ status: 'not_launched', action: 'launch' });
+  });
+
   it('reports a pending round whose process exited as dead, so the caller stops waiting', async () => {
     const options = await abandonedLaunch();
 

@@ -13,7 +13,7 @@ import { withNativeTarget } from './target-ownership.js';
  * claimant. A pending record with a free lock means the launching process is
  * gone: nothing will ever finish that round, and a caller must not wait on it.
  */
-export type RoundLivenessStatus = 'running' | 'dead' | 'not_launched' | 'completed' | 'failed' | 'idle';
+export type RoundLivenessStatus = 'launching' | 'running' | 'dead' | 'not_launched' | 'completed' | 'failed' | 'idle';
 
 /** What the caller does next: keep waiting, resume the dead launch, launch the round, read the report, or inspect. */
 export type RoundLivenessAction = 'wait' | 'resume' | 'launch' | 'process_report' | 'inspect' | 'none';
@@ -142,12 +142,12 @@ export async function inspectRoundLiveness(options: RoundLivenessOptions): Promi
   // A live guarded review owns the target; describe its launch once it is recorded.
   const { launch } = await readLaunch(options.gitCommonDir, target).catch(() => ({ launch: undefined }));
   const current = launch?.status === 'pending' && (options.headSha === undefined || launch.headSha === options.headSha);
-  return { target, status: 'running', action: 'wait', ...(current ? { launch: describeLaunch(launch) } : {}),
+  return { target, status: current ? 'running' : 'launching', action: 'wait', ...(current ? { launch: describeLaunch(launch) } : {}),
     message: current ? `A review process holds the target and is working on ${label(launch)}.`
       : 'A review process holds the target and has not yet recorded its launch.' };
 }
 
-/** Poll until the round is no longer running or the timeout passes; a dead round returns at once. */
+/** Poll through launch preparation and execution; a terminal or dead round returns at once. */
 export async function waitForRoundOutcome(options: RoundOutcomeWaitOptions): Promise<RoundLiveness> {
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
@@ -155,7 +155,7 @@ export async function waitForRoundOutcome(options: RoundOutcomeWaitOptions): Pro
   const deadline = now() + options.timeoutMs;
   for (;;) {
     const liveness = await inspectRoundLiveness(options);
-    if (liveness.status !== 'running' || now() >= deadline) return liveness;
+    if (!['launching', 'running'].includes(liveness.status) || now() >= deadline) return liveness;
     await sleep(Math.max(0, Math.min(interval, deadline - now())));
   }
 }

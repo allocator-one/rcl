@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Report `launching` while an accepted convergence review prepares credentials,
+  configuration and its diff, before the round registers (RCL-236). Native
+  target ownership now covers that startup window, and `converge-status --wait`
+  waits through it. A PR-bound patch with a convergence target uses guarded
+  launch when no attempt was explicitly preclaimed, so its pending and completed
+  `lastLaunch` records remain visible outside review cycles too.
+
 ## 4.5.34 - 2026-11-10
 
 - Leave generated paths out of the reviewed patch of a PR (RCL-209). A release

@@ -7,7 +7,7 @@ export { launchSchema, type GuardedLaunchState, type GuardedLaunchCompletion, ty
 import { isDeepStrictEqual } from 'node:util';
 import { assertNoPendingFreshReview, freshReviewCompletionPending, freshReviewRequestVersion, prepareFreshReview, finishFreshReview, verifyReviewCycle } from './fresh-review.js';
 import type { ReviewCycleRemote } from './review-cycle.js';
-import { withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
+import { assertNativeTargetOwnership, withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
 import { RegistryCleanupError } from '../coordination/registry-lock.js';
 import { convergeAttemptStatePath } from './attempt-budget.js';
 import { realpath } from 'node:fs/promises';
@@ -70,6 +70,8 @@ export class ReviewCouncilInterrupted extends Error {
 }
 
 export interface GuardedLaunchOptions {
+  /** Ownership accepted before slow CLI preflight; reuse it without reacquiring the target. */
+  ownership?: NativeTargetOwnership;
   gitCommonDir: string;
   target: string;
   headSha: string;
@@ -348,6 +350,10 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Gu
     ...(input.legacyRetry ? { legacyRetry: { ...structuredClone(input.legacyRetry), reportPath: resolve(input.legacyRetry.reportPath) } } : {}) };
   options.gitCommonDir = await realpath(resolve(options.gitCommonDir));
   const requestVersion = options.startOver ? await freshReviewRequestVersion(options.gitCommonDir, options.target) : undefined;
+  if (options.ownership) {
+    await assertNativeTargetOwnership(options.ownership, options.gitCommonDir, options.target);
+    return guardReviewLaunchOwned(options, options.ownership);
+  }
   let completed: GuardedLaunchClaim | undefined;
   try {
     return await withNativeTarget(options.gitCommonDir, options.target, async ownership => {

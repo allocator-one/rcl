@@ -434,6 +434,7 @@ target lock from preflight until it writes its terminal record, so:
 
 | Status | Meaning | Exit |
 | --- | --- | --- |
+| `launching` | The CLI accepted a convergence launch and holds the target during credential/config/diff preparation, before a pending round is registered | 0 |
 | `running` | A review process holds the target (also a resumed council, whose record still names its exited original process) | 0 |
 | `dead` | The latest launch is pending, its process is gone and nothing holds the target: nothing will finish the round | 6 |
 | `not_launched` | No launch reached `--head`, and nothing holds the target | 6 |
@@ -442,7 +443,7 @@ target lock from preflight until it writes its terminal record, so:
 | `idle` | No guarded launch is recorded (without `--head`) | 0 |
 
 `--wait <minutes>` polls every `--interval` seconds (30 by default) while the
-round is running and returns as soon as it finishes or dies, so a caller can
+round is launching or running and returns as soon as it finishes or dies, so a caller can
 wait on that instead of on a report that may never arrive. For `dead`, rerun
 the same guarded review command: an interrupted journaled council resumes
 without spending an attempt, and a `dispatch_unknown` refusal goes to the
