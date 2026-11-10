@@ -432,6 +432,10 @@ record stays, and a caller that waits for the worker's report waits forever.
 the target's native state without changing it. A guarded review holds the
 target lock from preflight until it writes its terminal record, so:
 
+Guarded launches leave unrelated telemetry in the outbox for
+`rcl telemetry flush`; startup delivery cannot delay this acknowledgment or
+acquire another target lock while the launch owns its target.
+
 | Status | Meaning | Exit |
 | --- | --- | --- |
 | `launching` | The CLI accepted a convergence launch and holds the target during credential/config/diff preparation, before a pending round is registered | 0 |

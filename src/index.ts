@@ -2246,9 +2246,10 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       throw new ReviewLaunchRefused('pending_preview_incompatible', '--preview-pending requires one pending recovery mode and --ordinary-pending-package, without --retry-report.');
     }
     if (!opts.exportPendingPackage) opts = { ...opts, ...await discoverCycleReview(target, opts) };
-    // Finalize-only is a recovery-state operation even though it is exposed by
-    // `review`; preview and apply must not flush unrelated review evidence.
-    if (!opts.launchOwnership && !opts.exportPendingPackage && !opts.finalizePendingOnly && !opts.cycleReview && opts.telemetry !== false &&
+    // Guarded launches must acknowledge ownership before network work. Leave
+    // unrelated evidence queued for an explicit flush, which may acquire its
+    // own target locks. Recovery preview/apply also leave that queue untouched.
+    if (!opts.guardedConverge && !opts.launchOwnership && !opts.exportPendingPackage && !opts.finalizePendingOnly && !opts.cycleReview && opts.telemetry !== false &&
       (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() !== 'off') {
       try {
         if ((await readdir(join(resolveDataDir(), 'outbox')).catch(() => [])).length > 0) {
