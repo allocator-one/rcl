@@ -298,6 +298,7 @@ export const DIGESTED_CONFIG_FIELDS = [
   'roles',
   'reviewers',
   'customRoles',
+  'couplingLens',
   'thresholds',
   'gating',
   'output',

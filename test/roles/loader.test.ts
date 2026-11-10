@@ -13,20 +13,22 @@ afterEach(() => {
 describe("resolveRoles — 'all' keyword", () => {
   it("['all'] returns all roles when spec content exists", async () => {
     const roles = await resolveRoles(emptyConfig, ['all'], SPEC);
-    expect(roles).toHaveLength(BUILTIN_ROLES.length);
+    // The coupling lens needs repository config; the rest are all built in.
+    expect(roles).toHaveLength(BUILTIN_ROLES.length - 1);
   });
 
   it("['all'] skips content-dependent roles when their content is absent", async () => {
     const roles = await resolveRoles(emptyConfig, ['all']);
-    expect(roles).toHaveLength(BUILTIN_ROLES.length - 1);
+    expect(roles).toHaveLength(BUILTIN_ROLES.length - 2);
     const names = roles.map((r) => r.name);
+    expect(names).not.toContain('cross-context-coupling');
     expect(names).not.toContain('project-rules');
     expect(names).not.toContain('spec-compliance');
   });
 
   it("['ALL'] is case-insensitive", async () => {
     const roles = await resolveRoles(emptyConfig, ['ALL'], SPEC);
-    expect(roles).toHaveLength(BUILTIN_ROLES.length);
+    expect(roles).toHaveLength(BUILTIN_ROLES.length - 1);
   });
 
   it("['all', 'security'] throws because 'all' cannot be combined", async () => {
@@ -76,7 +78,8 @@ describe('retired built-in roles', () => {
     expect(names).not.toContain('dead-code');
     expect(names).toContain('general');
     expect(names).toContain('spec-compliance');
-    expect(BUILTIN_ROLES.map((role) => role.name)).toEqual(names);
+    // Only the config-gated coupling lens is built in but not default.
+    expect(BUILTIN_ROLES.map((role) => role.name).filter((name) => name !== 'cross-context-coupling')).toEqual(names);
   });
 
   it('warns and skips stale explicit names while keeping valid roles', async () => {
@@ -147,5 +150,41 @@ describe('resolveRoles — case-variant custom override', () => {
     expect(securityRoles[0]!.systemPrompt).toBe('my custom security prompt');
     // no duplicate under the mixed-case key
     expect(roles.filter((r) => r.name === 'Security-Auditor')).toHaveLength(0);
+  });
+});
+
+describe('resolveRoles — cross-context coupling lens', () => {
+  const couplingLens = {
+    contexts: [
+      { name: 'DataRoom', paths: ['lib/data_room'], modules: ['App.DataRoom'] },
+      { name: 'Contacts', paths: ['lib/contacts'], modules: ['App.Contacts'] },
+    ],
+  };
+
+  it('is absent from default resolution and from all without repository configuration', async () => {
+    for (const requested of [undefined, ['all']]) {
+      const roles = await resolveRoles(emptyConfig, requested, SPEC);
+      expect(roles.map((r) => r.name)).not.toContain('cross-context-coupling');
+    }
+  });
+
+  it('is part of default resolution and all once the repository configures its contexts', async () => {
+    for (const requested of [undefined, ['all']]) {
+      const roles = await resolveRoles({ couplingLens }, requested, SPEC);
+      expect(roles.map((r) => r.name)).toContain('cross-context-coupling');
+    }
+  });
+
+  it('warns when requested by name without configuration but keeps the seat', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const roles = await resolveRoles(emptyConfig, ['cross-context-coupling']);
+    expect(roles.map((r) => r.name)).toEqual(['cross-context-coupling']);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('couplingLens'));
+  });
+
+  it('does not warn when configured', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await resolveRoles({ couplingLens }, ['cross-context-coupling']);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

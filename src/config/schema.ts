@@ -28,6 +28,51 @@ export const RoleConfigSchema = z.object({
   severityBias: z.record(z.string(), z.number()).optional(),
 });
 
+const CouplingContextSchema = z.object({
+  /**
+   * Short label used in findings and in `neutral` / `allow`. It reaches the
+   * lens's system prompt, so it is a plain label, never free text.
+   */
+  name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/, 'a context name is a short plain label'),
+  /** Directory prefixes (repo-relative) whose files belong to this context. */
+  paths: z.array(z.string().min(1)).min(1),
+  /** Module or import-path prefixes this context owns, e.g. `AllocatorOne.DataRoom`. */
+  modules: z.array(z.string().min(1)).min(1),
+});
+
+/**
+ * Cross-context coupling lens (RCL-49). The repository declares its bounded
+ * contexts; the lens flags added lines in one context that reference
+ * another context's modules. Absent means the lens does not run.
+ */
+export const CouplingLensSchema = z
+  .object({
+    contexts: z.array(CouplingContextSchema).min(2),
+    /** Contexts every other context may reference (a shared kernel). */
+    neutral: z.array(z.string()).optional(),
+    /** Directed references that are intended and never flagged. */
+    allow: z.array(z.object({ from: z.string(), to: z.string() })).optional(),
+    /** Severity findings are requested at; the default `minor` never gates. */
+    severity: z.enum(['important', 'minor', 'nitpick']).optional(),
+  })
+  .superRefine((lens, ctx) => {
+    const names = new Set<string>();
+    lens.contexts.forEach((context, index) => {
+      if (names.has(context.name)) {
+        ctx.addIssue({ code: 'custom', path: ['contexts', index, 'name'], message: `duplicate context "${context.name}"` });
+      }
+      names.add(context.name);
+    });
+    const unknown = (path: (string | number)[], name: string) => {
+      if (!names.has(name)) ctx.addIssue({ code: 'custom', path, message: `unknown context "${name}"` });
+    };
+    lens.neutral?.forEach((name, index) => unknown(['neutral', index], name));
+    lens.allow?.forEach((pair, index) => {
+      unknown(['allow', index, 'from'], pair.from);
+      unknown(['allow', index, 'to'], pair.to);
+    });
+  });
+
 export const ThresholdsSchema = z.object({
   minConsensusScore: z.number().min(0).max(1).optional(),
   minConfidence: z.number().min(0).max(1).optional(),
@@ -99,6 +144,7 @@ export const ConfigSchema = z.object({
   roles: z.array(z.string()).optional(),
   reviewers: z.array(ReviewerPairSchema).optional(),
   customRoles: z.array(RoleConfigSchema).optional(),
+  couplingLens: CouplingLensSchema.optional(),
   thresholds: ThresholdsSchema.optional(),
   gating: GatingSchema.optional(),
   output: OutputSchema.optional(),
@@ -132,6 +178,7 @@ export const ConfigSchema = z.object({
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type ReviewerPair = z.infer<typeof ReviewerPairSchema>;
+export type CouplingLensConfig = z.infer<typeof CouplingLensSchema>;
 export type RoleConfig = z.infer<typeof RoleConfigSchema>;
 export type Thresholds = z.infer<typeof ThresholdsSchema>;
 export type Severity = z.infer<typeof SeveritySchema>;

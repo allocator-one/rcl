@@ -49,6 +49,7 @@ import { historicalExecutionPlan, legacyPendingClaimRoles } from './converge/leg
 import { decodeOriginalReport } from './evidence/original-run/decode.js';
 import { originalRunReportSchema } from './telemetry/recovery/source.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
+import { COUPLING_LENS_ROLE_NAME, couplingCandidateNotes, specializeCouplingLensRole } from './roles/coupling-lens.js';
 import { defaultAdapterFactory, runReviews } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
 import {
@@ -2589,10 +2590,16 @@ async function prepareCouncilWork(
   // One bounded copy of the spec and PR text for every reviewer and chunk (RCL-191).
   const taskContext = buildTaskContext({ specContent: prepared.specContent,
     ...(diff.source === 'github' && diff.metadata ? { pr: { title: diff.metadata.title, body: diff.metadata.body } } : {}) });
-  const prompts = await Promise.all(chunkAssignments.map(({ assignment, chunk }) => buildPrompt(chunk, assignment.role, {
+  const couplingLens = prepared.config.couplingLens;
+  const prompts = await Promise.all(chunkAssignments.map(({ assignment, chunk }) => buildPrompt(chunk,
+    // The coupling lens gets this chunk's deterministic scan candidates (RCL-49).
+    couplingLens ? specializeCouplingLensRole(assignment.role, chunk.files, couplingLens) : assignment.role, {
     contextDocs,
     plan: focus === undefined ? undefined : { focus },
     ...(taskContext ? { taskContext } : {}),
+    // Its candidates carry pull request filenames, so they go to the user prompt (RCL-49).
+    ...(couplingLens && assignment.role.name === COUPLING_LENS_ROLE_NAME
+      ? { untrustedNotes: couplingCandidateNotes(chunk.files, couplingLens) } : {}),
   })));
   return { chunks, chunkAssignments, contextDocs, prompts, bounds, taskContext };
 }

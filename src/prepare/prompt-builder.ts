@@ -3,7 +3,7 @@ import { readFile } from 'fs/promises';
 import { stat } from 'fs/promises';
 import { buildBasePrompt } from '../prompts/base.js';
 import { buildPlanPrompt, PLAN_ROLE_PREAMBLE, type PlanFocus } from '../prompts/plan.js';
-import { buildSecureDiffSection } from '../prompts/hardening.js';
+import { buildSecureDiffSection, type UntrustedNote } from '../prompts/hardening.js';
 import { TYPESCRIPT_PROMPT_ADDITION } from '../prompts/languages/typescript.js';
 import { ELIXIR_PROMPT_ADDITION } from '../prompts/languages/elixir.js';
 import { PYTHON_PROMPT_ADDITION } from '../prompts/languages/python.js';
@@ -28,6 +28,8 @@ function getLanguageAdditions(languages: Set<string>): string {
   return Array.from(additions).join('\n\n');
 }
 
+export type { UntrustedNote };
+
 export interface PromptContext {
   /** Paths read at prompt-build time; prefer `contextDocs` when the caller needs digests. */
   contextFiles?: string[];
@@ -41,6 +43,12 @@ export interface PromptContext {
   plan?: { focus?: PlanFocus };
   /** Bounded spec and pull request text shared by every reviewer (RCL-191). */
   taskContext?: TaskContext;
+  /**
+   * Data a role's scan derived from the pull request (file paths and the
+   * like). It goes in the user prompt behind the untrusted-data boundary,
+   * never into the system prompt.
+   */
+  untrustedNotes?: readonly UntrustedNote[];
 }
 
 export interface ContextDoc {
@@ -145,7 +153,7 @@ export async function buildPrompt(
   // Build user prompt
   const basePrompt = context?.plan ? buildPlanPrompt(context.plan.focus) : buildBasePrompt();
   const diffText = formatChunkForPrompt(chunk);
-  const secureSection = buildSecureDiffSection(diffText, contextDocs, context?.taskContext);
+  const secureSection = buildSecureDiffSection(diffText, contextDocs, context?.taskContext, context?.untrustedNotes);
 
   const userPrompt = `${basePrompt}\n\n${secureSection}`;
 
