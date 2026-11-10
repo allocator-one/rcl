@@ -98,6 +98,13 @@ it.each([
   await expect(isUserPrivateGroup(1000, 1000, files(item.passwd, item.group), noUserdb)).resolves.toBe(item.safe);
 });
 
+it.each([
+  { name: 'a duplicate username with another uid', passwd: 'ann:x:1000:1000::/h:/bin/sh\nann:x:1002:1002::/h:/bin/sh' },
+  { name: 'a duplicate uid', passwd: 'ann:x:1000:1000::/h:/bin/sh\nbob:x:1000:1000::/h:/bin/sh' },
+])('refuses $name in /etc/passwd', async item => {
+  await expect(isUserPrivateGroup(1000, 1000, files(item.passwd, 'ann:x:1000:'), noUserdb)).resolves.toBe(false);
+});
+
 it('never treats the root account or group 0 as a user-private group', async () => {
   await expect(isUserPrivateGroup(0, 0, files('root:x:0:0:root:/root:/bin/bash', 'root:x:0:'), noUserdb)).resolves.toBe(false);
   await expect(isUserPrivateGroup(1000, 0, files('ann:x:1000:0::/h:/bin/sh', 'root:x:0:'), noUserdb)).resolves.toBe(false);
@@ -114,6 +121,8 @@ it.each([
   { name: 'no group line', nsswitch: 'passwd: files\n', safe: false },
   { name: 'no passwd line', nsswitch: 'group: files\n', safe: false },
   { name: 'an unreadable nsswitch.conf', nsswitch: null, safe: false },
+  { name: 'systemd as the only passwd source', nsswitch: 'passwd: systemd\ngroup: files systemd\n', safe: false },
+  { name: 'systemd as the only group source', nsswitch: 'passwd: files systemd\ngroup: systemd\n', safe: false },
 ])('requires local-file account sources: $name', async item => {
   await expect(isUserPrivateGroup(1000, 1000, files('ann:x:1000:1000::/h:/bin/sh', 'ann:x:1000:', item.nsswitch), noUserdb)).resolves.toBe(item.safe);
 });
@@ -125,6 +134,9 @@ it.each([
   { name: 'nss-systemd with a userdb membership drop-in', nsswitch: systemdAccounts, dirs: { '/etc/userdb': ['ann.membership'] }, safe: false },
   { name: 'nss-systemd with a runtime userdb record', nsswitch: systemdAccounts, dirs: { '/run/userdb': ['bob.user'] }, safe: false },
   { name: 'nss-systemd with a vendor userdb record', nsswitch: systemdAccounts, dirs: { '/usr/lib/userdb': ['bob.user'] }, safe: false },
+  { name: 'nss-systemd with a locally installed userdb record', nsswitch: systemdAccounts, dirs: { '/usr/local/lib/userdb': ['bob.user'] }, safe: false },
+  { name: 'nss-systemd with only the stock userdb sockets', nsswitch: systemdAccounts, dirs: { '/run/systemd/userdb': ['io.systemd.DynamicUser', 'io.systemd.Multiplexer'] }, safe: true },
+  { name: 'nss-systemd with a running systemd-homed socket', nsswitch: systemdAccounts, dirs: { '/run/systemd/userdb': ['io.systemd.Home'] }, safe: false },
   { name: 'files only, where userdb records are never consulted', nsswitch: 'passwd: files\ngroup: files\n', dirs: { '/etc/userdb': ['bob.user'] }, safe: true },
 ])('checks systemd userdb records only when nss-systemd answers lookups: $name', async item => {
   await expect(isUserPrivateGroup(1000, 1000, files('ann:x:1000:1000::/h:/bin/sh', 'ann:x:1000:', item.nsswitch), userdb(item.dirs))).resolves.toBe(item.safe);

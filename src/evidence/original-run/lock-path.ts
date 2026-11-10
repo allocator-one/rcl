@@ -27,12 +27,16 @@ type AccountReader = (path: string) => Promise<string>;
 const accountRows = async (read: AccountReader, path: string): Promise<string[][]> =>
   (await read(path)).split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(':'));
 
-// Only the local files may answer passwd, group and initgroups lookups. Any other source
-// (sss, ldap, nis, compat, winbind…) can add members these files do not list. nss-systemd
-// adds users and group memberships from userdb records, so it counts as local only while no
-// userdb directory holds a record.
+// Scope of the private-group claim: local files, the listed userdb locations, no ACL. The
+// local files must answer passwd and group lookups (`files` listed in both), and no other
+// source (sss, ldap, nis, compat, winbind…) may answer any lookup, since it can add members
+// these files do not list. nss-systemd may follow `files`; it adds users and memberships from
+// userdb records, so it counts as local only while none of the userdb directories below holds
+// a record and no systemd-homed socket exists. A userdb service that registers elsewhere, or
+// a daemon added after this check, is outside the claim.
 const localAccountSources = new Set(['files', 'systemd']);
-const userdbDirectories = ['/etc/userdb', '/run/userdb', '/run/host/userdb', '/usr/lib/userdb'];
+const userdbDirectories = ['/etc/userdb', '/run/userdb', '/run/host/userdb', '/usr/lib/userdb', '/usr/local/lib/userdb'];
+const userdbServiceDirectory = '/run/systemd/userdb'; const homedService = 'io.systemd.Home';
 type DirectoryLister = (path: string) => Promise<string[]>;
 async function usesOnlyLocalAccounts(read: AccountReader, list: DirectoryLister): Promise<boolean> {
   const lines = (await read('/etc/nsswitch.conf')).split('\n').map(line => line.replace(/#.*/, '').trim());
@@ -42,21 +46,26 @@ async function usesOnlyLocalAccounts(read: AccountReader, list: DirectoryLister)
   };
   // glibc falls back to the group database when there is no initgroups line.
   const databases = [sourcesOf('passwd'), sourcesOf('group'), sourcesOf('initgroups') ?? []];
-  if (databases.slice(0, 2).some(sources => !sources?.length) || databases.some(sources => sources!.some(source => !localAccountSources.has(source)))) return false;
+  if (databases.slice(0, 2).some(sources => !sources?.includes('files')) || databases.some(sources => sources!.some(source => !localAccountSources.has(source)))) return false;
   if (!databases.some(sources => sources!.includes('systemd'))) return true;
   for (const directory of userdbDirectories) {
     try { if ((await list(directory)).length > 0) return false; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false; }
   }
+  try { if ((await list(userdbServiceDirectory)).includes(homedService)) return false; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false; }
   return true;
 }
 
 /**
  * True when `gid` is the primary group of `uid` and nobody else is in it, as
- * with Debian/Ubuntu user-private groups. Reads only /etc/passwd, /etc/group,
- * /etc/nsswitch.conf and the systemd userdb directories; answers false when any
- * is unreadable, when the lookup order names a source other than local files,
- * when a userdb record exists, when the owner is not shown and for root or group 0.
+ * with Debian/Ubuntu user-private groups. The claim covers local files, the
+ * listed userdb locations and no ACL (checked by the caller), nothing more. It
+ * reads only /etc/passwd, /etc/group, /etc/nsswitch.conf and the systemd userdb
+ * locations, and answers false when any is unreadable, when `files` is not
+ * listed for passwd and group or another source answers a lookup, when a userdb
+ * record or a systemd-homed socket exists, when a username or the owner's uid
+ * appears twice in /etc/passwd, when the owner is not shown and for root or group 0.
  */
 export async function isUserPrivateGroup(uid: number, gid: number, read: AccountReader = path => readFile(path, 'utf8'),
   list: DirectoryLister = path => readdir(path)): Promise<boolean> {
@@ -65,6 +74,7 @@ export async function isUserPrivateGroup(uid: number, gid: number, read: Account
     if (!await usesOnlyLocalAccounts(read, list)) return false;
     const passwd = await accountRows(read, '/etc/passwd'); const groups = await accountRows(read, '/etc/group');
     const owner = passwd.find(row => row[2] === String(uid));
+    if (new Set(passwd.map(row => row[0])).size !== passwd.length || passwd.filter(row => row[2] === String(uid)).length > 1) return false;
     const matching = groups.filter(row => row[2] === String(gid));
     return owner !== undefined && owner[3] === String(gid) && matching.length > 0 &&
       passwd.every(row => row[3] !== String(gid) || row[2] === String(uid)) &&
