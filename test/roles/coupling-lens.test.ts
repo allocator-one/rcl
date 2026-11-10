@@ -205,6 +205,20 @@ describe('detectCrossContextCoupling — should not flag', () => {
     ]);
   });
 
+  it('does not treat a hyphenated sibling package as the configured import prefix', () => {
+    const config: CouplingLensConfig = {
+      contexts: [
+        { name: 'billing', paths: ['src/billing'], modules: ['@app/billing'] },
+        { name: 'orders', paths: ['src/orders'], modules: ['@app/orders'] },
+      ],
+    };
+    const candidates = (...lines: string[]) =>
+      detectCrossContextCoupling([file('src/orders/checkout.ts', added(...lines))], config);
+
+    expect(candidates("import { a } from '@app/billing-portal';", "import { b } from '@app/billing-portal/pages';")).toEqual([]);
+    expect(candidates("import { c } from '@app/billing/invoices';", "import { d } from '@app/billing';")).toHaveLength(2);
+  });
+
   it('ignores comment-only lines and module declarations', () => {
     none([
       file(

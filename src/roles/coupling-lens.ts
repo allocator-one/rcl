@@ -63,8 +63,10 @@ function moduleMatchers(contexts: Context[]): ModuleMatcher[] {
       context,
       prefix,
       // Whole-identifier match: `App.DataRoom` must not match
-      // `App.DataRoomPortal` or `MyApp.DataRoom`.
-      pattern: new RegExp(`(?<![${IDENT}.])${escapeRegExp(prefix)}(?![${IDENT}])`, 'g'),
+      // `App.DataRoomPortal` or `MyApp.DataRoom`, nor `@app/data-room` the
+      // sibling package `@app/data-room-portal`. A hyphen only continues a
+      // name after the prefix: `a-App.DataRoom` is a subtraction.
+      pattern: new RegExp(`(?<![${IDENT}.])${escapeRegExp(prefix)}(?![${IDENT}-])`, 'g'),
     }))
   );
 }
