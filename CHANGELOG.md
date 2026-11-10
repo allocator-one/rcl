@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Keep provider calls on HTTP/1.1 under Node's environment proxy (RCL-233). With
+  `NODE_USE_ENV_PROXY=1` (or `--use-env-proxy`) and a proxy variable set, Node
+  installs its own `EnvHttpProxyAgent` before user code runs; the HTTP/1.1
+  transport from RCL-213 took it for a customised dispatcher and left it alone,
+  so proxy users on Node 26 could keep HTTP/2 through the tunnel. The transport
+  now replaces an option-less `EnvHttpProxyAgent` with one that has
+  `allowH2: false`; a dispatcher a `--import` preload customised still survives,
+  including one with its own `httpProxy` or `httpsProxy` (an explicit `noProxy`
+  stays private inside undici's agent and is not detected).
+
 - Publish `@allocator-one/rcl` with an `npm-shrinkwrap.json` (RCL-208). The
   tarball declared its ten runtime dependencies with caret ranges and no
   lockfile, so each install resolved whatever was newest within them. `npm
