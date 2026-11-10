@@ -8,8 +8,17 @@ import type { ReviewAssignment } from '../roles/types.js';
 import { freezeCheckpointPlan, blockingCheckpointSeatIds, type FrozenCheckpointPlan } from './checkpoint.js';
 import { resolveQuorumPolicy, type QuorumPolicy } from './quorum.js';
 
-/** Shared local/server protocol bounds; never truncate captured inputs to fit. */
+/** Default local/server protocol bounds; never truncate captured inputs to fit. */
 export const CAPTURED_INPUT_LIMITS = Object.freeze({ bytes: 8 * 1024 * 1024, cells: 500, seats: 200, chunks: 32 });
+/** Explicit capacity remains bounded, including before parsing persisted inputs. */
+export const CAPTURED_INPUT_HARD_LIMITS = Object.freeze({ bytes: 64 * 1024 * 1024, cells: 8192, seats: 200, chunks: 512 });
+export interface CapturedInputCapacity { bytes: number; cells: number; seats: number; chunks: number }
+const capacitySchema = z.object({
+  bytes: z.number().int().positive().safe().max(CAPTURED_INPUT_HARD_LIMITS.bytes),
+  cells: z.number().int().positive().safe().max(CAPTURED_INPUT_HARD_LIMITS.cells),
+  seats: z.number().int().positive().safe().max(CAPTURED_INPUT_HARD_LIMITS.seats),
+  chunks: z.number().int().positive().safe().max(CAPTURED_INPUT_HARD_LIMITS.chunks),
+}).strict();
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const text = z.string().min(1);
 const versionedTool = z.object({ name: text, version: z.number().int().positive().safe() }).strict();
@@ -20,17 +29,20 @@ const roleSchema = z.object({ name: text, systemPrompt: z.string(), focus: z.arr
 const contextSchema = z.array(z.object({ label: text, content: z.string(), sha256: digest }).strict());
 const captureSchema = z.object({
   version: z.union([z.literal(1), z.literal(2)]),
+  capacity: z.unknown().optional(),
   plan: z.unknown(),
   policy: z.object({ version: z.literal(1), fraction: z.number().finite() }).strict(),
   blobs: z.record(digest, z.string()),
   aggregationSha256: digest.optional(),
   async: capturedAsyncSchema.optional(),
-  roles: z.array(z.object({ cell: text, sha256: digest }).strict()).max(CAPTURED_INPUT_LIMITS.cells),
+  roles: z.array(z.object({ cell: text, sha256: digest }).strict()).max(CAPTURED_INPUT_HARD_LIMITS.cells),
 }).strict();
 
 export interface CaptureReviewerInputs {
   plan: FrozenCheckpointPlan;
   policy: Pick<QuorumPolicy, 'version' | 'fraction'>;
+  /** Explicit opt-in, persisted with the source bytes for exact recovery. */
+  capacity?: CapturedInputCapacity;
   /** Exact source bytes captured before dispatch, never reconstructed from a terminal summary. */
   patchBytes: string;
   configBytes: string;
@@ -62,27 +74,34 @@ function freeze<T>(value: T): T {
   return value;
 }
 
-function bound(bytes: string): void {
-  if (typeof bytes !== 'string' || Buffer.byteLength(bytes, 'utf8') > CAPTURED_INPUT_LIMITS.bytes ||
+function validatedCapacity(value: unknown): CapturedInputCapacity {
+  if (value === undefined) return CAPTURED_INPUT_LIMITS;
+  const parsed = capacitySchema.safeParse(value);
+  if (!parsed.success) throw new Error('capture_invalid_capacity');
+  return parsed.data;
+}
+
+function bound(bytes: string, maxBytes: number): void {
+  if (typeof bytes !== 'string' || Buffer.byteLength(bytes, 'utf8') > maxBytes ||
     Buffer.from(bytes, 'utf8').toString('utf8') !== bytes) throw new Error('capture_invalid_bytes');
 }
 
 /** Generated protocol documents use one canonical encoding; ambiguous JSON is never accepted. */
-function decodeCanonical(bytes: string): unknown {
-  bound(bytes);
+function decodeCanonical(bytes: string, maxBytes: number): unknown {
+  bound(bytes, maxBytes);
   let decoded: unknown;
   try { decoded = JSON.parse(bytes); } catch { throw new Error('capture_invalid_json'); }
   if (stableStringify(decoded) !== bytes) throw new Error('capture_noncanonical_json');
   return decoded;
 }
 
-function validatedPlan(value: unknown): FrozenCheckpointPlan {
+function validatedPlan(value: unknown, capacity: CapturedInputCapacity): FrozenCheckpointPlan {
   let plan: FrozenCheckpointPlan;
   try { plan = freezeCheckpointPlan(value as FrozenCheckpointPlan); }
   catch { throw new Error('capture_invalid_plan'); }
   if (stableStringify(plan) !== stableStringify(value) || plan.roster.length < 2 ||
-    plan.roster.length > CAPTURED_INPUT_LIMITS.seats || plan.chunks.length > CAPTURED_INPUT_LIMITS.chunks ||
-    plan.cells.length > CAPTURED_INPUT_LIMITS.cells) throw new Error('capture_invalid_plan');
+    plan.roster.length > capacity.seats || plan.chunks.length > capacity.chunks ||
+    plan.cells.length > capacity.cells) throw new Error('capture_invalid_plan');
   return plan;
 }
 
@@ -92,17 +111,18 @@ function validatedPlan(value: unknown): FrozenCheckpointPlan {
  * claim. Persist it in the existing checkpoint before any provider intent.
  */
 export function captureReviewerInputs(input: CaptureReviewerInputs): CapturedReviewerInputs {
-  const plan = validatedPlan(input.plan);
+  const capacity = validatedCapacity(input.capacity);
+  const plan = validatedPlan(input.plan, capacity);
   if (input.assignments.length !== plan.cells.length || input.prompts.length !== plan.cells.length ||
     input.chunkBytes.length !== plan.chunks.length) throw new Error('capture_incomplete_matrix');
   const blobs: Record<string, string> = Object.create(null) as Record<string, string>;
   let uniqueBytes = 0;
   function add(bytes: string, expected?: string): string {
-    bound(bytes);
+    bound(bytes, capacity.bytes);
     const hash = sha256Hex(bytes);
     if (expected !== undefined && hash !== expected) throw new Error('capture_input_mismatch');
     if (!Object.hasOwn(blobs, hash)) uniqueBytes += Buffer.byteLength(bytes, 'utf8');
-    if (uniqueBytes > CAPTURED_INPUT_LIMITS.bytes) throw new Error('capture_invalid_bytes');
+    if (uniqueBytes > capacity.bytes) throw new Error('capture_invalid_bytes');
     blobs[hash] = bytes;
     return hash;
   }
@@ -125,6 +145,7 @@ export function captureReviewerInputs(input: CaptureReviewerInputs): CapturedRev
   }
   const async = input.async === undefined ? undefined : captureAsyncInputs(input.async, plan, add);
   const bytes = stableStringify({ version: plan.version, plan, policy: input.policy, blobs, roles,
+    ...(input.capacity === undefined ? {} : { capacity }),
     ...(async === undefined ? {} : { async }),
     ...(aggregationSha256 !== undefined ? { aggregationSha256 } : {}) });
   return decodeCapturedInputs(bytes, plan);
@@ -136,9 +157,13 @@ export function captureReviewerInputs(input: CaptureReviewerInputs): CapturedRev
  * mandatory admission checks. Legacy reports without this capture cannot pass.
  */
 export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): CapturedReviewerInputs {
-  const parsed = captureSchema.safeParse(decodeCanonical(bytes));
+  // The ceiling applies before JSON allocation. Persisted capacity is part of
+  // the caller-authenticated capture digest, never a mutable recovery default.
+  const parsed = captureSchema.safeParse(decodeCanonical(bytes, CAPTURED_INPUT_HARD_LIMITS.bytes));
   if (!parsed.success) throw new Error('capture_invalid_document');
-  const captured = parsed.data, plan = validatedPlan(captured.plan), expected = validatedPlan(expectedPlan);
+  const captured = parsed.data, capacity = validatedCapacity(captured.capacity);
+  bound(bytes, capacity.bytes);
+  const plan = validatedPlan(captured.plan, capacity), expected = validatedPlan(expectedPlan, capacity);
   if (stableStringify(plan) !== stableStringify(expected)) throw new Error('capture_plan_mismatch');
   if (captured.version !== plan.version) throw new Error('capture_plan_version_mismatch');
   const policy = resolveQuorumPolicy(blockingCheckpointSeatIds(plan).length, captured.policy.fraction);
@@ -149,18 +174,18 @@ export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): Capt
     // while every new decode must validate the bytes again.
     if (!referenced.has(hash)) {
       if (typeof value !== 'string' || sha256Hex(value) !== hash) throw new Error('capture_missing_or_changed_blob');
-      bound(value); referenced.add(hash);
+      bound(value, capacity.bytes); referenced.add(hash);
     }
     return value;
   }
   const patchBytes = get(plan.patchSha256), configBytes = get(plan.configSha256), specBytes = get(plan.specSha256);
   const contextBytes = get(plan.contextSha256), toolsBytes = get(plan.toolsSha256);
-  const config = configSchema.safeParse(decodeCanonical(configBytes));
+  const config = configSchema.safeParse(decodeCanonical(configBytes, capacity.bytes));
   if (!config.success || stableStringify(config.data) !== configBytes ||
     (config.data.quorumFraction ?? 2 / 3) !== policy.fraction) throw new Error('capture_invalid_config_or_policy');
-  const context = contextSchema.safeParse(decodeCanonical(contextBytes));
+  const context = contextSchema.safeParse(decodeCanonical(contextBytes, capacity.bytes));
   if (!context.success || context.data.some(doc => sha256Hex(doc.content) !== doc.sha256)) throw new Error('capture_invalid_context');
-  const tools = toolsSchema.safeParse(decodeCanonical(toolsBytes));
+  const tools = toolsSchema.safeParse(decodeCanonical(toolsBytes, capacity.bytes));
   if (!tools.success || stableStringify(tools.data.parser) !== stableStringify(plan.parser)) throw new Error('capture_incompatible_tools');
   const chunkBytes = plan.chunks.map(chunk => get(chunk.digest));
   if (captured.roles.length !== plan.cells.length) throw new Error('capture_incomplete_matrix');
@@ -169,7 +194,7 @@ export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): Capt
   plan.cells.forEach((cell, index) => {
     const reference = captured.roles[index]!;
     if (reference.cell !== cell.id) throw new Error('capture_assignment_mismatch');
-    const role = roleSchema.safeParse(decodeCanonical(get(reference.sha256)));
+    const role = roleSchema.safeParse(decodeCanonical(get(reference.sha256), capacity.bytes));
     if (!role.success || role.data.name !== cell.role ||
       seatRoles.has(cell.seat) && seatRoles.get(cell.seat) !== reference.sha256) throw new Error('capture_assignment_mismatch');
     seatRoles.set(cell.seat, reference.sha256);
@@ -181,10 +206,11 @@ export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): Capt
   if (aggregation && stableStringify(aggregation.algorithm) !== stableStringify(tools.data.aggregation)) {
     throw new Error('capture_incompatible_aggregation');
   }
-  const async = captured.async === undefined ? undefined : decodeCapturedAsync(captured.async, plan, get, bytes => roleSchema.parse(decodeCanonical(bytes)));
+  const async = captured.async === undefined ? undefined : decodeCapturedAsync(captured.async, plan, get, bytes => roleSchema.parse(decodeCanonical(bytes, capacity.bytes)));
   if (Object.keys(captured.blobs).length !== referenced.size) throw new Error('capture_unreferenced_blob');
   return freeze({ version: captured.version, bytes, digest: sha256Hex(bytes), plan, policy, config: config.data,
     patchBytes, configBytes, specBytes, contextBytes, toolsBytes, chunkBytes, assignments, prompts,
+    ...(captured.capacity === undefined ? {} : { capacity }),
     ...(async === undefined ? {} : { async }),
     ...(aggregation !== undefined ? { aggregation } : {}) });
 }

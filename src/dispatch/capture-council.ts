@@ -1,7 +1,8 @@
 import type { CapturedAggregationInputs } from '../report/aggregation-inputs.js';
 import type { Config } from '../config/schema.js';
 import { resolveProviderConcurrency } from '../config/provider-concurrency.js';
-import { formatChunkForPrompt, chunkDiff, type Chunk } from '../prepare/chunker.js';
+import { formatChunkForPrompt, chunkDiff, type Chunk, type ReviewCapacity } from '../prepare/chunker.js';
+import type { CapturedInputCapacity } from './captured-inputs.js';
 import type { ContextDoc, BuiltPrompt } from '../prepare/prompt-builder.js';
 import { DIGESTED_CONFIG_FIELDS, configDigest, diffDigest, sha256Hex, stableStringify } from '../report/run-header.js';
 import type { Diff } from '../resolver/types.js';
@@ -28,6 +29,10 @@ export interface CapturePreparedCouncilInput {
   /** Exact resolved original assignment lanes; omission creates historical version1 only. */
   lanes?: readonly ('blocking' | 'secondary')[];
   chunks: readonly Chunk[];
+  /** The same explicit source bound used when the caller prepared chunks. */
+  reviewCapacity?: ReviewCapacity;
+  /** The bounded capture allocation retained with the authenticated bytes. */
+  captureCapacity?: CapturedInputCapacity;
   prompts: readonly BuiltPrompt[];
   /** Resolved config. This factory persists only the existing digest allow-list. */
   config: Config;
@@ -90,7 +95,7 @@ function planLineage(plan: FrozenCheckpointPlan): string {
  */
 export function capturePreparedCouncil(input: CapturePreparedCouncilInput): CapturedPreparedCouncil {
   if (!input.assignments.length || input.chunks.length === 0) throw new Error('capture_council_empty_matrix');
-  const regeneratedChunks = chunkDiff(input.diff.files);
+  const regeneratedChunks = chunkDiff(input.diff.files, input.reviewCapacity);
   if (!sameChunks(input.chunks, regeneratedChunks)) throw new Error('capture_council_chunk_source_mismatch');
   const expectedCalls = input.chunks.length * input.assignments.length;
   if (input.prompts.length !== expectedCalls) throw new Error('capture_council_incomplete_matrix');
@@ -153,6 +158,7 @@ export function capturePreparedCouncil(input: CapturePreparedCouncilInput): Capt
   }
   const captured = captureReviewerInputs({
     plan,
+    ...(input.captureCapacity === undefined ? {} : { capacity: input.captureCapacity }),
     policy: { version: 1, fraction: input.config.quorumFraction ?? 2 / 3 },
     patchBytes,
     configBytes,

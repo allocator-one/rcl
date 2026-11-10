@@ -1,7 +1,8 @@
 import { guardedInputSha256, stableStringify } from '../report/run-header.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { NativeReviewCycle } from './review-cycle.js';
-import { retainGuardedInput, restoreGuardedInput, type RetainedGuardedInput,
+import { DEFAULT_GUARDED_INPUT_CAPACITY, retainGuardedInput, restoreGuardedInput,
+  validateGuardedInputCapacity, type GuardedInputCapacity, type RetainedGuardedInput,
   type StoredGuardedInput } from './guarded-input-retention.js';
 
 export interface OrdinaryPendingPackage {
@@ -60,7 +61,7 @@ function deepFreezeJson<T>(value: T): T {
 
 /** Prepare one bounded canonical archive and lazily memoized digest for trusted internal reuse. */
 export function prepareOrdinaryPendingGuardedInput(
-  stored: StoredGuardedInput): PreparedOrdinaryPendingGuardedInput {
+  stored: StoredGuardedInput, capacity?: GuardedInputCapacity): PreparedOrdinaryPendingGuardedInput {
   const compact = !!stored && typeof stored === 'object' && !Array.isArray(stored) &&
     (stored as Record<string, unknown>).encoding === 'json-string-table-v1';
   let input: Record<string, unknown> | undefined;
@@ -68,16 +69,21 @@ export function prepareOrdinaryPendingGuardedInput(
   let retained: RetainedGuardedInput;
   if (compact) {
     input = deepFreezeJson(restoreGuardedInput(stored));
+    const archive = stored as RetainedGuardedInput;
+    if (capacity !== undefined &&
+        !isDeepStrictEqual(validateGuardedInputCapacity(capacity), archive.capacity ?? DEFAULT_GUARDED_INPUT_CAPACITY)) {
+      throw new Error('guarded_input_capacity_mismatch');
+    }
     wireInput = input;
     retained = deepFreezeJson({ version: 1 as const, encoding: 'json-string-table-v1' as const,
-      strings: (stored as RetainedGuardedInput).strings,
-      root: (stored as RetainedGuardedInput).root });
+      strings: archive.strings, root: archive.root,
+      ...(archive.capacity === undefined ? {} : { capacity: { ...archive.capacity } }) });
   } else {
     wireInput = stored as Record<string, unknown>;
     // This single encoder pass both validates raw recursive bounds and creates
     // the immutable wire archive. Canonical expansion stays lazy for retention
     // paths that only need the archive, exact raw bytes and digest.
-    retained = deepFreezeJson(retainGuardedInput(wireInput));
+    retained = deepFreezeJson(retainGuardedInput(wireInput, capacity));
   }
   const digest = guardedInputSha256(input ?? wireInput);
   const prepared = Object.freeze({ wireInput, retained,

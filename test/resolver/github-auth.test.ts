@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Octokit } from '@octokit/rest';
 import { fetchPRDiff } from '../../src/resolver/github.js';
+import { loadHostedPinnedGitDiff, loadPinnedGitDiff, PinnedGitObjectsUnavailableError } from '../../src/resolver/git.js';
 import { postGitHubReview } from '../../src/output/github.js';
 import { sampleResult } from '../telemetry/fixtures.js';
 
@@ -13,10 +14,15 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('node:child_process', () => ({ execFile: mocks.execFile }));
+vi.mock('../../src/resolver/git.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../src/resolver/git.js')>(),
+  loadPinnedGitDiff: vi.fn(), loadHostedPinnedGitDiff: vi.fn(),
+}));
 vi.mock('@octokit/rest', () => ({
   Octokit: vi.fn(function (options) {
     mocks.construct(options);
     return {
+      auth: async () => options.auth ? { type: 'token', token: options.auth } : { type: 'unauthenticated' },
       pulls: { get: mocks.get, createReview: mocks.createReview },
       repos: { compareCommitsWithBasehead: mocks.compare },
     };
@@ -130,6 +136,19 @@ describe('explicit GitHub operations resolve credentials before requests', () =>
       /404.*private.*GITHUB_TOKEN.*githubToken/i,
     );
     expect(mocks.createReview).not.toHaveBeenCalled();
+  });
+
+  it('reuses gh authentication for private hosted acquisition without a second lookup', async () => {
+    const mergeBaseSha = 'c'.repeat(40);
+    mocks.compare.mockResolvedValue({ data: { files: [], merge_base_commit: { sha: mergeBaseSha } } });
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('outside matching clone'));
+    vi.mocked(loadHostedPinnedGitDiff).mockResolvedValue({ source: 'local', files: [], rawDiff: '', mergeBaseSha });
+
+    await fetchPRDiff(target, undefined, undefined, { maxDiffBytes: 16 * 1024 * 1024 });
+
+    expect(loadHostedPinnedGitDiff).toHaveBeenCalledWith(expect.objectContaining({ token: 'gh-fixture-token',
+      expectedMergeBaseSha: mergeBaseSha }));
+    expect(mocks.execFile).toHaveBeenCalledTimes(1);
   });
 
   it('does not consult account credentials for an injected GitHub client', async () => {

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import * as runHeader from '../../src/report/run-header.js';
 import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
-import { captureReviewerInputs, decodeCapturedInputs } from '../../src/dispatch/captured-inputs.js';
+import { CAPTURED_INPUT_HARD_LIMITS, CAPTURED_INPUT_LIMITS, captureReviewerInputs, decodeCapturedInputs } from '../../src/dispatch/captured-inputs.js';
 
 function fixture() {
   const configBytes = stableStringify({ quorumFraction: 2 / 3, timeout: 1000 });
@@ -23,6 +23,90 @@ function fixture() {
 }
 
 describe('captured reviewer inputs', () => {
+  it('preserves the default wire format and binds an explicit capacity into the capture digest', () => {
+    const input = fixture(), original = captureReviewerInputs(input);
+    expect(JSON.parse(original.bytes)).not.toHaveProperty('capacity');
+    const captured = captureReviewerInputs({ ...input, capacity: CAPTURED_INPUT_HARD_LIMITS });
+    expect(JSON.parse(captured.bytes).capacity).toEqual(CAPTURED_INPUT_HARD_LIMITS);
+    expect(decodeCapturedInputs(captured.bytes, input.plan).capacity).toEqual(CAPTURED_INPUT_HARD_LIMITS);
+    expect(captured.digest).not.toBe(original.digest);
+    expect(Object.isFrozen(captured.capacity)).toBe(true);
+  });
+
+  it('requires explicit capacity for a large patch and recovers it from the persisted document', () => {
+    const input = fixture();
+    input.patchBytes = 'p'.repeat(CAPTURED_INPUT_LIMITS.bytes + 1);
+    input.plan = freezeCheckpointPlan({ ...input.plan, patchSha256: sha256Hex(input.patchBytes) });
+    expect(() => captureReviewerInputs(input)).toThrow('capture_invalid_bytes');
+    const captured = captureReviewerInputs({ ...input, capacity: CAPTURED_INPUT_HARD_LIMITS });
+    const decoded = decodeCapturedInputs(captured.bytes, input.plan);
+    expect(decoded.patchBytes).toBe(input.patchBytes);
+    expect(decoded.digest).toBe(captured.digest);
+    const stripped = JSON.parse(captured.bytes);
+    delete stripped.capacity;
+    expect(() => decodeCapturedInputs(stableStringify(stripped), input.plan)).toThrow('capture_invalid_bytes');
+  }, 15_000);
+
+  it('captures a complete 400 chunk by 17 reviewer matrix only with explicit capacity', () => {
+    const base = fixture();
+    const roster = Array.from({ length: 17 }, (_, index) => ({ ...base.plan.roster[0]!, seat: `s${index}`, model: `fake/m${index}` }));
+    const chunkBytes = Array.from({ length: 400 }, (_, index) => `chunk ${index}`);
+    const prompts = chunkBytes.flatMap(() => roster.map(() => base.prompts[0]!));
+    const plan = freezeCheckpointPlan({ ...base.plan, roster,
+      chunks: chunkBytes.map((bytes, index) => ({ index, total: chunkBytes.length, digest: sha256Hex(bytes) })),
+      prompts: chunkBytes.flatMap((_, chunk) => roster.map(seat => ({ seat: seat.seat, chunk,
+        systemSha256: sha256Hex(base.prompts[0]!.systemPrompt), userSha256: sha256Hex(base.prompts[0]!.userPrompt) }))),
+    });
+    const input = { ...base, plan, chunkBytes, prompts,
+      assignments: plan.cells.map(cell => ({ ...base.assignments[0]!, model: cell.model })) };
+    expect(() => captureReviewerInputs(input)).toThrow('capture_invalid_plan');
+    const captured = captureReviewerInputs({ ...input, capacity: CAPTURED_INPUT_HARD_LIMITS });
+    const recovered = decodeCapturedInputs(captured.bytes, plan);
+    expect(recovered.plan.cells).toHaveLength(6800);
+    expect(recovered.chunkBytes).toEqual(chunkBytes);
+    expect(recovered.assignments).toEqual(input.assignments);
+    const lowered = JSON.parse(captured.bytes);
+    lowered.capacity.cells = 6799;
+    expect(() => decodeCapturedInputs(stableStringify(lowered), plan)).toThrow('capture_invalid_plan');
+    lowered.capacity = { ...CAPTURED_INPUT_HARD_LIMITS, chunks: 399 };
+    expect(() => decodeCapturedInputs(stableStringify(lowered), plan)).toThrow('capture_invalid_plan');
+  }, 15_000);
+
+  it.each([
+    ['bytes', 64 * 1024 * 1024 + 1], ['cells', 8193], ['chunks', 513], ['seats', 201],
+    ['bytes', 0], ['cells', 1.5], ['chunks', Number.MAX_SAFE_INTEGER + 1],
+  ])('rejects invalid explicit %s capacity before capture and on recovery', (key, value) => {
+    const input = fixture(), capacity = { ...CAPTURED_INPUT_LIMITS, [key]: value };
+    expect(() => captureReviewerInputs({ ...input, capacity })).toThrow('capture_invalid_capacity');
+    const wire = { ...JSON.parse(captureReviewerInputs(input).bytes), capacity };
+    expect(() => decodeCapturedInputs(stableStringify(wire), input.plan)).toThrow('capture_invalid_capacity');
+  });
+
+  it('rejects partial or unknown capacity fields instead of filling in defaults', () => {
+    const input = fixture();
+    for (const capacity of [{ bytes: CAPTURED_INPUT_LIMITS.bytes }, { ...CAPTURED_INPUT_LIMITS, unknown: 1 }, null]) {
+      expect(() => captureReviewerInputs({ ...input, capacity } as any)).toThrow('capture_invalid_capacity');
+      const wire = { ...JSON.parse(captureReviewerInputs(input).bytes), capacity };
+      expect(() => decodeCapturedInputs(stableStringify(wire), input.plan)).toThrow('capture_invalid_capacity');
+    }
+  });
+
+  it('enforces the encoded document byte limit even when all individual blobs fit', () => {
+    const input = fixture(), captured = captureReviewerInputs(input);
+    const capacity = { ...CAPTURED_INPUT_LIMITS, bytes: Buffer.byteLength(captured.bytes) };
+    expect(() => captureReviewerInputs({ ...input, capacity })).toThrow('capture_invalid_bytes');
+  });
+
+  it('retains content integrity and unreferenced blob checks with expanded capacity', () => {
+    const input = fixture(), captured = captureReviewerInputs({ ...input, capacity: CAPTURED_INPUT_HARD_LIMITS });
+    const changed = JSON.parse(captured.bytes);
+    changed.blobs[sha256Hex(input.patchBytes)] = 'changed';
+    expect(() => decodeCapturedInputs(stableStringify(changed), input.plan)).toThrow('capture_missing_or_changed_blob');
+    const extra = JSON.parse(captured.bytes);
+    extra.blobs[sha256Hex('extra')] = 'extra';
+    expect(() => decodeCapturedInputs(stableStringify(extra), input.plan)).toThrow('capture_unreferenced_blob');
+  });
+
   it('validates a large shared blob once per decode without carrying trust into another decode', () => {
     const base = fixture(), systemPrompt = 'S'.repeat(4 * 1024 * 1024);
     const roster = Array.from({ length: 100 }, (_, index) => ({ ...base.plan.roster[0]!, seat: `s${index}`, model: `fake/m${index}` }));

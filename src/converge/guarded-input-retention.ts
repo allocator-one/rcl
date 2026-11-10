@@ -1,5 +1,35 @@
 const ENCODING = 'json-string-table-v1' as const;
-const MAX_DECODED_GUARDED_INPUT_BYTES = 128 * 1024 * 1024;
+export interface GuardedInputCapacity {
+  decodedBytes: number;
+  retainedBytes: number;
+}
+
+export const DEFAULT_GUARDED_INPUT_CAPACITY: Readonly<GuardedInputCapacity> = Object.freeze({
+  decodedBytes: 128 * 1024 * 1024,
+  retainedBytes: 20 * 1024 * 1024,
+});
+
+export const MAX_GUARDED_INPUT_CAPACITY: Readonly<GuardedInputCapacity> = Object.freeze({
+  decodedBytes: 512 * 1024 * 1024,
+  retainedBytes: 64 * 1024 * 1024,
+});
+
+/** Explicit finite limits; never let an archive authorize unbounded expansion. */
+export function validateGuardedInputCapacity(capacity: GuardedInputCapacity): GuardedInputCapacity {
+  if (!capacity || typeof capacity !== 'object' || Array.isArray(capacity) ||
+      Object.keys(capacity).sort().join(',') !== 'decodedBytes,retainedBytes') {
+    throw new Error('guarded_input_capacity_invalid');
+  }
+  const result = {} as GuardedInputCapacity;
+  for (const field of ['decodedBytes', 'retainedBytes'] as const) {
+    const value = capacity[field];
+    if (!Number.isSafeInteger(value) || value < 1 || value > MAX_GUARDED_INPUT_CAPACITY[field]) {
+      throw new Error('guarded_input_capacity_invalid');
+    }
+    result[field] = value;
+  }
+  return result;
+}
 const MAX_GUARDED_INPUT_NODES = 1_000_000;
 // Recursive codec frames and the archive's tuple wrappers both consume V8 stack.
 // 256 leaves ample headroom for callers and JSON serialization while exceeding
@@ -15,6 +45,8 @@ export interface RetainedGuardedInput {
   encoding: typeof ENCODING;
   strings: string[];
   root: EncodedNode;
+  /** Authenticated by the immutable enclosing packet; omitted by legacy/default archives. */
+  capacity?: GuardedInputCapacity;
 }
 
 export type StoredGuardedInput = Record<string, unknown> | RetainedGuardedInput;
@@ -40,7 +72,11 @@ function interned(strings: string[], encodedStringBytes: number[],
  * always within the decoder's recovery bound without materializing repeated
  * prompt strings first.
  */
-export function retainGuardedInput(value: Record<string, unknown>): RetainedGuardedInput {
+export function retainGuardedInput(
+  value: Record<string, unknown>, requestedCapacity?: GuardedInputCapacity
+): RetainedGuardedInput {
+  const capacity = validateGuardedInputCapacity(requestedCapacity === undefined
+    ? DEFAULT_GUARDED_INPUT_CAPACITY : requestedCapacity);
   if (!plainRecord(value)) throw new Error('guarded_input_invalid');
   const strings: string[] = [];
   const encodedStringBytes: number[] = [];
@@ -49,7 +85,7 @@ export function retainGuardedInput(value: Record<string, unknown>): RetainedGuar
   let expandedBytes = 0;
   const addExpandedBytes = (bytes: number): void => {
     expandedBytes += bytes;
-    if (!Number.isSafeInteger(expandedBytes) || expandedBytes > MAX_DECODED_GUARDED_INPUT_BYTES) {
+    if (!Number.isSafeInteger(expandedBytes) || expandedBytes > capacity.decodedBytes) {
       throw new Error('guarded_input_archive_expands_too_large');
     }
   };
@@ -93,11 +129,18 @@ export function retainGuardedInput(value: Record<string, unknown>): RetainedGuar
     throw new Error('guarded_input_invalid');
   };
 
-  return { version: 1, encoding: ENCODING, strings, root: encode(value, 0) };
+  return { version: 1, encoding: ENCODING, strings, root: encode(value, 0),
+    ...(requestedCapacity === undefined ? {} : { capacity }) };
 }
 
 function isRetained(value: unknown): value is RetainedGuardedInput {
   return plainRecord(value) && value.encoding === ENCODING;
+}
+
+/** Recover only validated archive limits; raw/legacy JSON keeps the defaults. */
+export function retainedGuardedInputCapacity(value: StoredGuardedInput): GuardedInputCapacity {
+  return validateGuardedInputCapacity(isRetained(value) && Object.hasOwn(value, 'capacity')
+    ? value.capacity! : DEFAULT_GUARDED_INPUT_CAPACITY);
 }
 
 /** Restore and authenticate the canonical retained representation. */
@@ -109,7 +152,10 @@ export function restoreGuardedInput(value: StoredGuardedInput): Record<string, u
     retainGuardedInput(value);
     return value;
   }
-  if (Object.keys(value).sort().join(',') !== 'encoding,root,strings,version' ||
+  const capacity = retainedGuardedInputCapacity(value);
+  const keys = Object.hasOwn(value, 'capacity')
+    ? 'capacity,encoding,root,strings,version' : 'encoding,root,strings,version';
+  if (Object.keys(value).sort().join(',') !== keys ||
       value.version !== 1 || !Array.isArray(value.strings) ||
       value.strings.some(item => typeof item !== 'string') ||
       new Set(value.strings).size !== value.strings.length) {
@@ -124,7 +170,7 @@ export function restoreGuardedInput(value: StoredGuardedInput): Record<string, u
     Buffer.byteLength(JSON.stringify(string), 'utf8'));
   const addExpandedBytes = (bytes: number): void => {
     expandedBytes += bytes;
-    if (!Number.isSafeInteger(expandedBytes) || expandedBytes > MAX_DECODED_GUARDED_INPUT_BYTES) {
+    if (!Number.isSafeInteger(expandedBytes) || expandedBytes > capacity.decodedBytes) {
       throw new Error('guarded_input_archive_expands_too_large');
     }
   };

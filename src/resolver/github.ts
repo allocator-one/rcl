@@ -2,7 +2,9 @@ import type { Octokit, RestEndpointMethodTypes } from '@octokit/rest';
 import { sourceExceedsReviewCapacity } from '../prepare/chunker.js';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
-import { createGitHubClient, getGitHubPullRequest } from './github-client.js';
+import { createGitHubClient, getGitHubClientToken, getGitHubPullRequest } from './github-client.js';
+import { loadHostedPinnedGitDiff, loadPinnedGitDiff, PinnedGitObjectsUnavailableError } from './git.js';
+import { parseUnifiedDiff } from '../prepare/unified-diff.js';
 import { ancestorDirectories, generatedPathMatcher, leaveOutGenerated } from './generated-paths.js';
 
 export interface GitHubTarget {
@@ -141,7 +143,8 @@ async function fetchChangedFiles(
     if (requireMergeBase && (typeof mergeBaseSha !== "string" || !/^[a-f0-9]{40}$/.test(mergeBaseSha))) {
       throw new Error("The exact PR comparison did not provide a valid effective merge base.");
     }
-    if (files !== undefined && files.length === pr.changed_files) return { files, ...(mergeBaseSha ? { mergeBaseSha } : {}) };
+    if (files !== undefined && files.length === pr.changed_files) return { files,
+      ...(typeof mergeBaseSha === 'string' && /^[a-f0-9]{40}$/.test(mergeBaseSha) ? { mergeBaseSha } : {}) };
   }
 
   const listed: ChangedFile[] = await octokit.paginate(octokit.pulls.listFiles, {
@@ -163,7 +166,22 @@ async function fetchChangedFiles(
       `PR #${target.number} reports ${recheck.changed_files} changed files but the API listed ${listed.length} — the diff is incomplete (GitHub lists at most 3,000 files), refusing to review it as if it were whole.`
     );
   }
-  return { files: listed, ...(mergeBaseSha ? { mergeBaseSha } : {}) };
+  return { files: listed,
+    ...(typeof mergeBaseSha === 'string' && /^[a-f0-9]{40}$/.test(mergeBaseSha) ? { mergeBaseSha } : {}) };
+}
+
+async function fetchMergeBaseSha(octokit: Octokit, target: GitHubTarget, pr: PullRequest): Promise<string> {
+  if (![pr.base.sha, pr.head.sha].every(sha => /^[a-f0-9]{40}$/.test(sha))) {
+    throw new Error('A complete PR patch requires exact GitHub comparison commits.');
+  }
+  const comparison = await octokit.repos.compareCommitsWithBasehead({
+    owner: target.owner, repo: target.repo, basehead: `${pr.base.sha}...${pr.head.sha}`,
+  });
+  const mergeBaseSha = comparison.data.merge_base_commit?.sha;
+  if (typeof mergeBaseSha !== 'string' || !/^[a-f0-9]{40}$/.test(mergeBaseSha)) {
+    throw new Error('The exact PR comparison did not provide a valid effective merge base.');
+  }
+  return mergeBaseSha;
 }
 
 // A root .gitattributes is a few lines; a megabyte of one is not a policy
@@ -217,7 +235,7 @@ export async function fetchPRDiff(
   target: GitHubTarget,
   token?: string,
   octokitClient?: Octokit,
-  options: { requireMergeBase?: boolean } = {}
+  options: { requireMergeBase?: boolean; maxDiffBytes?: number; cwd?: string } = {}
 ): Promise<Diff> {
   const octokit = octokitClient ?? await createGitHubClient(token);
   const pr = (await getGitHubPullRequest(octokit, target)).data;
@@ -225,7 +243,58 @@ export async function fetchPRDiff(
   // Exact-head binding: the files come from a compare pinned to the base and
   // head object ids this very response named (see fetchChangedFiles for the
   // large-PR fallback and its bracket), so the patches belong to `head_sha`.
-  const { files, mergeBaseSha } = await fetchChangedFiles(octokit, target, pr, options.requireMergeBase === true);
+  let files: ChangedFile[] = [];
+  let mergeBaseSha: string | undefined;
+  if (options.maxDiffBytes === undefined) {
+    ({ files, mergeBaseSha } = await fetchChangedFiles(octokit, target, pr, options.requireMergeBase === true));
+  } else {
+    // Only this immutable comparison may supply ancestry for a depth-one
+    // hosted object database; the paginated file list cannot establish it.
+    mergeBaseSha = await fetchMergeBaseSha(octokit, target, pr);
+  }
+  // Zero counts and a blob digest alone cannot distinguish binary/metadata
+  // changes from omitted text. Certify expected patchless files against the
+  // immutable comparison's raw diff before allowing ordinary remote review.
+  // Explicit capacity always requires the complete pinned object path.
+  const patchless = options.maxDiffBytes === undefined
+    ? await certifiedPatchlessFiles(octokit, target, pr, files)
+    : new Set<ChangedFile>();
+  let authoritative: Awaited<ReturnType<typeof loadPinnedGitDiff>> | undefined;
+  if (options.maxDiffBytes !== undefined || files.some(file => !completeApiPatch(file) && !patchless.has(file))) {
+    try {
+      const pinned = { owner: target.owner, repo: target.repo,
+        baseSha: pr.base.sha, headSha: pr.head.sha,
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        ...(mergeBaseSha === undefined ? {} : { expectedMergeBaseSha: mergeBaseSha }),
+        ...(options.maxDiffBytes === undefined ? {} : { maxBytes: options.maxDiffBytes }) };
+      try {
+        authoritative = await loadPinnedGitDiff(pinned);
+      } catch (error) {
+        // A malformed/oversized/binary patch or an ancestry mismatch remains a
+        // refusal. Hosted retrieval only repairs missing local object storage.
+        if (!(error instanceof PinnedGitObjectsUnavailableError)) throw error;
+        // Ordinary recovery retains the reader's default byte ceiling. Resolve
+        // ancestry from the same exact comparison if file pagination omitted it.
+        mergeBaseSha ??= await fetchMergeBaseSha(octokit, target, pr);
+        const hostedToken = token?.trim() || process.env['GITHUB_TOKEN']?.trim() || await getGitHubClientToken(octokit);
+        authoritative = await loadHostedPinnedGitDiff({ ...pinned, expectedMergeBaseSha: mergeBaseSha,
+          ...(hostedToken === undefined ? {} : { token: hostedToken }) });
+      }
+    } catch (error) {
+      throw new Error(`Cannot acquire a complete PR patch: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const recheck = (await getGitHubPullRequest(octokit, target)).data;
+    if (recheck.head.sha !== pr.head.sha || recheck.base.sha !== pr.base.sha) {
+      throw new Error(`PR #${target.number} moved while its pinned diff was read — rerun the review.`);
+    }
+    if (authoritative.files.length !== pr.changed_files || recheck.changed_files !== pr.changed_files) {
+      throw new Error(`Pinned PR patch is incomplete: expected ${pr.changed_files} files, read ${authoritative.files.length}.`);
+    }
+    if (mergeBaseSha !== undefined && mergeBaseSha !== authoritative.mergeBaseSha) {
+      throw new Error('Pinned PR merge base disagrees with the exact GitHub comparison.');
+    }
+    mergeBaseSha = authoritative.mergeBaseSha;
+  }
 
   const metadata: PRMetadata = {
     owner: target.owner,
@@ -260,15 +329,17 @@ export async function fetchPRDiff(
   // patch, but only when the full patch is more than one review can read: a
   // PR that fits is reviewed whole, whatever its files are. The base — never
   // the head — is the authority: a PR cannot switch review off for its own
-  // files by editing .gitattributes, and that edit is itself reviewed.
-  let leftOutResult: ReturnType<typeof leaveOutGenerated> = { files: changes };
-  const policy = sourceExceedsReviewCapacity(changes)
+  // files by editing .gitattributes, and that edit is itself reviewed. An
+  // explicit capacity asks for the complete patch, so nothing is left out then.
+  const reviewable: FileChange[] = authoritative?.files ?? changes;
+  let leftOutResult: ReturnType<typeof leaveOutGenerated> = { files: reviewable };
+  const policy = options.maxDiffBytes === undefined && sourceExceedsReviewCapacity(reviewable)
     ? await readAttributesPolicy(octokit, target, pr.base.sha)
     : undefined;
   if (policy?.root !== undefined) {
     const isGenerated = generatedPathMatcher(policy.root);
     leftOutResult = leaveOutGenerated(
-      changes,
+      reviewable,
       (path) => isGenerated(path) && !ancestorDirectories(path).some((directory) => policy.directories.has(directory)),
       pr.base.sha
     );
@@ -279,5 +350,128 @@ export async function fetchPRDiff(
     files: fileChanges,
     metadata: leftOut ? { ...metadata, leftOut } : metadata,
     source: 'github',
+    // The raw diff is the complete patch; it would contradict files with paths left out.
+    ...(authoritative?.rawDiff === undefined || leftOut ? {} : { rawDiff: authoritative.rawDiff }),
   };
+}
+
+function completeApiPatch(file: ChangedFile): boolean {
+  if (typeof file.patch !== 'string' || file.patch.length === 0 || !parseUnifiedDiff(file.patch).ok) return false;
+  let additions = 0, deletions = 0;
+  for (const line of file.patch.split('\n')) {
+    if (line.startsWith('+')) additions++;
+    if (line.startsWith('-')) deletions++;
+  }
+  return additions === file.additions && deletions === file.deletions;
+}
+
+// Match the ordinary local reader's bound; cancel the HTTP stream before an
+// oversized response can be accumulated or interpreted as a partial diff.
+const MAX_PATCHLESS_COMPARISON_BYTES = 10 * 1024 * 1024;
+
+async function certifiedPatchlessFiles(
+  octokit: Octokit, target: GitHubTarget, pr: PullRequest, files: ChangedFile[]
+): Promise<Set<ChangedFile>> {
+  const candidates = files.filter(file => (file.patch === undefined || file.patch === '') &&
+    file.additions === 0 && file.deletions === 0 && /^[a-f0-9]{40}$/.test(file.sha ?? ''));
+  if (candidates.length === 0 || ![pr.base.sha, pr.head.sha].every(sha => /^[a-f0-9]{40}$/.test(sha))) {
+    return new Set();
+  }
+  try {
+    const response = await octokit.repos.compareCommitsWithBasehead({
+      owner: target.owner, repo: target.repo, basehead: `${pr.base.sha}...${pr.head.sha}`,
+      mediaType: { format: 'diff' },
+      request: { parseSuccessResponseBody: false, signal: AbortSignal.timeout(30_000) },
+    });
+    const body: unknown = response.data;
+    if (!(body instanceof ReadableStream)) return new Set();
+    const reader = body.getReader();
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!(value instanceof Uint8Array)) return new Set();
+        bytes += value.byteLength;
+        if (bytes > MAX_PATCHLESS_COMPARISON_BYTES) return new Set();
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      await reader.cancel();
+      reader.releaseLock();
+    }
+    const rawDiff = Buffer.concat(chunks).toString('utf8');
+    if (!rawDiff.startsWith('diff --git ') || !rawDiff.endsWith('\n')) return new Set();
+    const blocks = rawDiff.split(/^diff --git /m).slice(1);
+    return new Set(candidates.filter(file => {
+      const oldPath = file.previous_filename ?? file.filename;
+      const headers = gitPathForms(`a/${oldPath}`).flatMap(old => gitPathForms(`b/${file.filename}`).map(next => `${old} ${next}\n`));
+      const matching = blocks.flatMap(block => {
+        const header = headers.find(candidate => block.startsWith(candidate));
+        return header ? [block.slice(header.length)] : [];
+      });
+      return matching.length === 1 && certifiesNonTextChange(file, matching[0]!);
+    }));
+  } catch {
+    // An unavailable or malformed raw comparison never licenses omission.
+    return new Set();
+  }
+}
+
+const GIT_PATH_ESCAPES = new Map([[7, '\\a'], [8, '\\b'], [9, '\\t'], [10, '\\n'], [11, '\\v'], [12, '\\f'], [13, '\\r'], [34, '\\"'], [92, '\\\\']]);
+
+/** Git C-quotes a path containing control characters, quotes, backslashes or (core.quotepath) non-ASCII bytes. */
+function quoteGitPath(path: string, quotePath: boolean): string {
+  const bytes = Buffer.from(path, 'utf8');
+  const needsQuote = (byte: number): boolean => byte < 0x20 || byte === 0x22 || byte === 0x5c || byte === 0x7f || (quotePath && byte >= 0x80);
+  if (!bytes.some(needsQuote)) return path;
+  let out = '"';
+  // Bytes Git leaves literal (non-ASCII under core.quotepath=false) are UTF-8
+  // text, so decode each run instead of mapping bytes to characters.
+  let literal: number[] = [];
+  const flush = (): void => { out += Buffer.from(literal).toString('utf8'); literal = []; };
+  for (const byte of bytes) {
+    const escape = GIT_PATH_ESCAPES.get(byte) ?? (needsQuote(byte) ? `\\${byte.toString(8).padStart(3, '0')}` : undefined);
+    if (escape === undefined) { literal.push(byte); continue; }
+    flush();
+    out += escape;
+  }
+  flush();
+  return `${out}"`;
+}
+
+/** Every spelling Git may print a path in, under either core.quotepath setting. */
+function gitPathForms(path: string): string[] {
+  return [...new Set([quoteGitPath(path, true), quoteGitPath(path, false)])];
+}
+
+function certifiesNonTextChange(file: ChangedFile, body: string): boolean {
+  if (!file.sha) return false;
+  const lines = body.split('\n');
+  if (lines.pop() !== '') return false;
+  // Mode changes can accompany a pure rename or a binary change.
+  let modeChange = false;
+  if (/^old mode [0-7]{6}$/.test(lines[0] ?? '') && /^new mode [0-7]{6}$/.test(lines[1] ?? '')) {
+    modeChange = lines[0]!.slice(9) !== lines[1]!.slice(9);
+    if (!modeChange) return false;
+    lines.splice(0, 2);
+  }
+  if (lines.length === 0) return modeChange && file.status === 'modified';
+  if (file.status === 'renamed' && file.previous_filename && lines.length === 3 &&
+      lines[0] === 'similarity index 100%' && gitPathForms(file.previous_filename).includes(lines[1]!.slice(12)) &&
+      lines[1]!.startsWith('rename from ') && lines[2]!.startsWith('rename to ') &&
+      gitPathForms(file.filename).includes(lines[2]!.slice(10))) return true;
+
+  if (file.status === 'added' && /^new file mode [0-7]{6}$/.test(lines[0] ?? '')) lines.shift();
+  if (file.status === 'removed' && /^deleted file mode [0-7]{6}$/.test(lines[0] ?? '')) lines.shift();
+  if (file.status === 'renamed' && file.previous_filename && /^similarity index (?:[0-9]{1,2}|100)%$/.test(lines[0] ?? '') &&
+      lines[1]?.startsWith('rename from ') && gitPathForms(file.previous_filename).includes(lines[1].slice(12)) &&
+      lines[2]?.startsWith('rename to ') && gitPathForms(file.filename).includes(lines[2].slice(10))) lines.splice(0, 3);
+  if (lines.length !== 2) return false;
+  const index = /^index ([a-f0-9]{7,40})\.\.([a-f0-9]{7,40})(?: [0-7]{6})?$/.exec(lines[0]!);
+  if (!index || !file.sha.startsWith(index[file.status === 'removed' ? 1 : 2]!)) return false;
+  const oldPaths = file.status === 'added' ? ['/dev/null'] : gitPathForms(`a/${file.previous_filename ?? file.filename}`);
+  const newPaths = file.status === 'removed' ? ['/dev/null'] : gitPathForms(`b/${file.filename}`);
+  return oldPaths.some(old => newPaths.some(next => lines[1] === `Binary files ${old} and ${next} differ`));
 }

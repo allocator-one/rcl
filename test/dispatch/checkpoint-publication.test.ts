@@ -1,3 +1,4 @@
+import { minimalCheckpointCapture } from './checkpoint-capture-fixture.js';
 import { createHash } from 'node:crypto';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
@@ -85,10 +86,10 @@ function basicInput() {
 }
 async function fixture(sealed=true) {
   const commonDir=await realpath(await mkdtemp(join(tmpdir(),'rcl-publication-')));roots.push(commonDir);
-  const plan=freezeCheckpointPlan(basicInput()),launch=createOriginalLaunch({runId,target,planDigest:plan.digest,capturedInputsSha256:hash('opaque'),originalNativeClaim:{round:1,attempt:1},startedAtMs:100,expiresAtMs:1000,maxPhysicalCalls:2,maxAttemptsPerCell:2});let journal!:CheckpointJournal;
+  const captured=minimalCheckpointCapture(basicInput()),plan=captured.plan,launch=createOriginalLaunch({runId,target,planDigest:plan.digest,capturedInputsSha256:captured.digest,originalNativeClaim:{round:1,attempt:1},startedAtMs:100,expiresAtMs:1000,maxPhysicalCalls:2,maxAttemptsPerCell:2});let journal!:CheckpointJournal;
   await withNativeTarget(commonDir,target,async ownership=>{
     journal=await CheckpointJournal.create({commonDir,namespace,plan,ownership});
-    await journal.bind('captured-inputs','opaque',ownership);await journal.bind('launch',encodeOriginalLaunch(launch),ownership);
+    await journal.bind('captured-inputs',captured.bytes,ownership);await journal.bind('launch',encodeOriginalLaunch(launch),ownership);
     await journal.recordIntent('general:0',{id:'reviewer-0',kind:'unknown'},ownership);
     if(sealed)await journal.finalize(ownership);
   });

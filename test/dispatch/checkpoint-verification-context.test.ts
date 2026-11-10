@@ -1,9 +1,10 @@
+import { minimalCheckpointCapture } from './checkpoint-capture-fixture.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CheckpointJournal, exportCheckpointProof, freezeCheckpointPlan, type CheckpointProof } from '../../src/dispatch/checkpoint.js';
+import { CheckpointJournal, exportCheckpointProof, type CheckpointProof } from '../../src/dispatch/checkpoint.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/dispatch/recovery-operation.js';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
@@ -13,10 +14,10 @@ const roots: string[] = [], target = 'allocator-one/rcl#105', runId = '11111111-
 afterEach(async () => { await Promise.all(roots.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
 async function proof(kind: 'launch' | 'operation' | 'missing' | 'bad-launch' | 'bad-operation' = 'launch'): Promise<CheckpointProof> {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'vctx-'))); roots.push(dir);
-  const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: 'c'.repeat(64), configSha256: 'd'.repeat(64), specSha256: 'e'.repeat(64), contextSha256: 'f'.repeat(64), toolsSha256: '0'.repeat(64), parser: { name: 'findings-json', version: 1 }, roster: [{ seat: 's0', model: 'm', role: 'r', route: 'fake' }], chunks: [{ index: 0, total: 1, digest: '1'.repeat(64) }], prompts: [{ seat: 's0', chunk: 0, systemSha256: '2'.repeat(64), userSha256: '3'.repeat(64) }] });
+  const captured = minimalCheckpointCapture({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: 'c'.repeat(64), configSha256: 'd'.repeat(64), specSha256: 'e'.repeat(64), contextSha256: 'f'.repeat(64), toolsSha256: '0'.repeat(64), parser: { name: 'findings-json', version: 1 }, roster: [{ seat: 's0', model: 'm', role: 'r', route: 'fake' }], chunks: [{ index: 0, total: 1, digest: '1'.repeat(64) }], prompts: [{ seat: 's0', chunk: 0, systemSha256: '2'.repeat(64), userSha256: '3'.repeat(64) }] }); const plan = captured.plan;
   return withNativeTarget(dir, target, async owner => {
     const journal = await CheckpointJournal.create({ commonDir: dir, namespace: `v${roots.length}`, plan, ownership: owner });
-    const capture = 'captured bytes';
+    const capture = captured.bytes;
     await journal.bind('captured-inputs', capture, owner);
     if (kind === 'launch' || kind === 'bad-launch') await journal.bind('launch', encodeOriginalLaunch(createOriginalLaunch({ runId, target, originalNativeClaim: { attempt: 1, round: 1 }, capturedInputsSha256: hash(capture), planDigest: kind === 'bad-launch' ? '9'.repeat(64) : plan.digest, startedAtMs: 100, expiresAtMs: 900, maxPhysicalCalls: 3, maxAttemptsPerCell: 2 })), owner);
     else if (kind !== 'missing') await journal.bind('operation', encodeRecoveryOperation(createRecoveryOperation({ operationId: '22222222-2222-4222-8222-222222222222', successorRunId: runId, sourceRunId: '33333333-3333-4333-8333-333333333333', sourceReportSha256: '4'.repeat(64), sourceCheckpointSha256: '5'.repeat(64), capturedInputsSha256: hash(capture), planDigest: plan.digest, target, originalNativeClaim: { attempt: 1, round: 1 }, ...(kind === 'bad-operation' ? {} : { successorNativeClaim: { attempt: 2, round: 1 } }), startedAtMs: 120, expiresAtMs: 800, maxAdditionalCalls: 2, maxAttemptsPerCell: 2 })), owner);

@@ -27,7 +27,7 @@ function changedFile(i: number) {
     filename: `src/file-${i}.ts`,
     status: 'modified',
     additions: 1,
-    deletions: 0,
+    deletions: 1,
     patch: `@@ -1 +1 @@\n-old\n+new-${i}`,
   };
 }
@@ -210,14 +210,19 @@ describe('fetchPRDiff', () => {
     );
   });
 
-  it('carries the blob id of every file so patchless changes stay bound to their content', async () => {
+  it('retains the blob binding for ordinary patchless remote changes', async () => {
     const pr = fakePr(1);
-    const compare = vi.fn(async () => ({
-      data: { files: [{ filename: 'app.bin', status: 'modified', additions: 0, deletions: 0, sha: 'blob123' }] },
-    }));
+    pr.data.base.sha = 'a'.repeat(40);
+    pr.data.head.sha = 'b'.repeat(40);
+    const compare = vi.fn().mockResolvedValueOnce({
+      data: { files: [{ filename: 'app.bin', status: 'modified', additions: 0, deletions: 0, sha: 'd'.repeat(40) }] },
+    }).mockResolvedValueOnce({ data: new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(Buffer.from('diff --git a/app.bin b/app.bin\nindex eeeeeee..ddddddd 100644\nBinary files a/app.bin and b/app.bin differ\n'));
+      controller.close();
+    } }) });
     const octokit = { pulls: { get: vi.fn().mockResolvedValue(pr) }, repos: { compareCommitsWithBasehead: compare } } as unknown as Octokit;
     const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);
-    expect(diff.files[0]).toMatchObject({ filename: 'app.bin', patch: '', blobSha: 'blob123' });
+    expect(diff.files).toEqual([expect.objectContaining({ filename: 'app.bin', patch: '', blobSha: 'd'.repeat(40) })]);
   });
 
   it('skips the compare for PRs above the cap and brackets the paged listing with PR reads', async () => {
@@ -329,7 +334,7 @@ describe('generated paths declared by the base .gitattributes (RCL-209)', () => 
 
   it('leaves nothing out, and reads no attributes, while the full patch fits the review', async () => {
     const f = release('1'.repeat(40), { attributes });
-    f.compare.mockResolvedValue({ data: { files: [changedFile(1), spec('1'.repeat(40), '@@ -1 +1,2 @@\n-a\n+b\n+c\n')] } } as any);
+    f.compare.mockResolvedValue({ data: { files: [changedFile(1), { ...spec('1'.repeat(40), '@@ -1 +1,2 @@\n-a\n+b\n+c\n'), additions: 2, deletions: 1 }] } } as any);
     const diff = await fetchPRDiff(target, undefined, f.octokit);
     expect(diff.metadata?.leftOut).toBeUndefined();
     expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toContain('+c');

@@ -1,10 +1,11 @@
+import { minimalCheckpointCapture } from './checkpoint-capture-fixture.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
-import { CheckpointJournal, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
+import { CheckpointJournal } from '../../src/dispatch/checkpoint.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { executeVerification, type VerificationExecutionOptions } from '../../src/dispatch/verification-execution.js';
 import { planGating, replayGating } from '../../src/consensus/gating.js';
@@ -19,19 +20,20 @@ const hash = (bytes: string) => createHash('sha256').update(bytes).digest('hex')
 const answer = (text = '[{"id":"F1","verdict":"confirmed","reason":"The supplied changed operation reaches the reported path.","failureMechanism":"The changed operation executes without the required guard.","evidence":[{"file":"a.ts","quote":"guard();"}]}]') => ({ model: 'openai/verifier', provider: 'openai', status: 'success' as const, text, durationMs: 1 });
 async function fixture(count = 9, timeout = 1000, pass = 6000) {
   const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'verification-execution-'))); roots.push(commonDir);
-  const checkpointPlan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: hash('patch'), configSha256: hash('config'), specSha256: hash('spec'), contextSha256: hash('context'), toolsSha256: hash('tools'), parser: { name: 'findings-json', version: 1 },
+  const captured = minimalCheckpointCapture({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: hash('patch'), configSha256: hash('config'), specSha256: hash('spec'), contextSha256: hash('context'), toolsSha256: hash('tools'), parser: { name: 'findings-json', version: 1 },
     roster: [{ seat: 'one', model: 'reviewer', role: 'general', route: 'openai' }], chunks: [{ index: 0, total: 1, digest: hash('chunk') }], prompts: [{ seat: 'one', chunk: 0, systemSha256: hash('system'), userSha256: hash('user') }] });
+  const checkpointPlan = captured.plan;
   const findings: ConsensusFinding[] = Array.from({ length: count }, (_, i) => ({ id: `f${i}`, file: 'a.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness', title: `claim ${i}`, description: 'guard missing',
     consensus: { score: 1, total: 3, models: ['m1'], roles: ['general'], crossRole: false, crossModel: false, elevated: false, elevation: 'none', confidence: 0.5, confidenceLabel: 'Medium', tier: 'single' } }));
   const plan = planGating(findings, { minModels: 2, verificationModel: 'openai/verifier', verificationTimeoutMs: timeout, verificationPassTimeoutMs: pass,
     diffFiles: [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 0, patch: '@@ -0,0 +1 @@\n+guard();', language: 'ts' }] });
   const saved = { runId, gatingPlanBytes: stableStringify(plan), model: plan.model, provider: 'openai', batches: plan.batches.map(({ systemPrompt, userPrompt }) => ({ systemPrompt, userPrompt })),
     startedAtMs: 2000, expiresAtMs: 2000 + pass, verificationTimeoutMs: timeout, verificationPassTimeoutMs: pass, maxPhysicalCalls: plan.batches.length };
-  const launch = createOriginalLaunch({ runId, target, planDigest: checkpointPlan.digest, capturedInputsSha256: hash('capture'), originalNativeClaim: { attempt: 1, round: 1 }, startedAtMs: 1000, expiresAtMs: 100000, maxPhysicalCalls: 1, maxAttemptsPerCell: 1 });
+  const launch = createOriginalLaunch({ runId, target, planDigest: checkpointPlan.digest, capturedInputsSha256: captured.digest, originalNativeClaim: { attempt: 1, round: 1 }, startedAtMs: 1000, expiresAtMs: 100000, maxPhysicalCalls: 1, maxAttemptsPerCell: 1 });
   let journal!: CheckpointJournal;
   await withNativeTarget(commonDir, target, async owner => {
     journal = await CheckpointJournal.create({ commonDir, namespace: 'verifier', plan: checkpointPlan, ownership: owner });
-    await journal.bind('captured-inputs', 'capture', owner); await journal.bind('launch', encodeOriginalLaunch(launch), owner);
+    await journal.bind('captured-inputs', captured.bytes, owner); await journal.bind('launch', encodeOriginalLaunch(launch), owner);
     await journal.recordIntent('one:0', { id: 'reviewer-intent', kind: 'unknown' }, owner); await journal.finalize(owner);
   });
   const auditLateAnswer = vi.fn(async () => {}), onLateAuditError = vi.fn(), beforeLaunch = vi.fn(async () => {});

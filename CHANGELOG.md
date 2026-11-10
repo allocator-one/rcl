@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## 4.5.44 - 2026-11-10
+
+- Admit explicitly bounded full-patch reviews above the ordinary 32-chunk limit
+  while preserving the default limits, exact input retention, guarded review
+  accounting, and complete-seat checks. For large pull requests, verify the
+  repository and exact commits and read the full pinned Git diff before any
+  paid dispatch; incomplete GitHub file patches fail closed. The hosted gate
+  accepts a capacity grant of three labels, `rcl-cap/<head-sha>`,
+  `rcl-cap-chunks/<n>` and `rcl-cap-calls/<n>`, each last applied by a
+  repository writer, without changing the default workflow (RCL-162). The limits
+  are the label names, never a description, which anyone with label-edit rights
+  could change after the approval; the issue timeline records who applied each
+  limit. A patch filename that validly contains U+FFFD, written by Git as octal
+  UTF-8 bytes, is accepted; only a raw replacement character is refused. The pinned diff also ignores a
+  repository-local `diff.ignoreSubmodules`, so submodule changes stay in the patch.
+  A local Git timeout or output-limit failure while reading the origin or checking
+  ancestry keeps its own refusal instead of selecting hosted acquisition. A patchless binary, mode-only or
+  pure-rename change is certified under either Git path quoting, and an attested PR
+  review refuses `--max-review-chunks` and `--max-blocking-calls` unless the
+  exact-head label grant supplies the same values.
+  A non-ASCII path that also needs C-quoting is matched in the form Git prints under
+  `core.quotepath=false`.
+  The pinned diff is read with Git's default path quoting, so a filename that really
+  contains U+FFFD is told apart from a replacement left by lossy decoding.
+  A pinned patch whose bytes are not valid UTF-8 is refused instead of having those
+  bytes replaced, locally and from hosted acquisition.
+  A `git diff --no-index` patch whose two verified marker paths differ is still
+  accepted, as it was before path verification.
+
 ## 4.5.43 - 2026-11-10
 
 - Accept `comprehensive` for `rcl review-plan --focus` (RCL-55). `--help` named it

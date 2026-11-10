@@ -6,7 +6,7 @@ import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs } from '../../
 import { guardedInputSha256, sha256Hex } from '../../src/report/run-header.js';
 import { claimConvergeAttempt, convergeAttemptStatePath } from '../../src/converge/attempt-budget.js';
 import { convergeRunStatePath } from '../../src/converge/run-state.js';
-import { retainGuardedInput, restoreGuardedInput } from '../../src/converge/guarded-input-retention.js';
+import { retainGuardedInput, restoreGuardedInput, MAX_GUARDED_INPUT_CAPACITY } from '../../src/converge/guarded-input-retention.js';
 import { ordinaryPendingGuardedInput } from '../../src/converge/ordinary-pending-package.js';
 
 const fault = vi.hoisted(() => ({ partialWrite: false, directoryMode: null as number | null, windowsDirectoryOpen: false, windowsFileFlags: false }));
@@ -236,6 +236,64 @@ describe('ordinary launch input retention', () => {
     expect(await readdir(directory)).toEqual(before);
     expect((await stat(retained.path)).size).toBe(limit);
   }, 20_000);
+
+  it('admits a selected encoded budget above 20 MiB and binds it in immutable packet bytes', async () => {
+    const gitCommonDir = await mkdtemp(join(tmpdir(), 'ordinary-opted-size-')); dirs.push(gitCommonDir);
+    const guardedInput = { head: 'a'.repeat(40), kind: 'pr',
+      prompts: [{ system: 'review', user: 'x'.repeat(21 * 1024 * 1024) }] };
+    const options = { gitCommonDir, target: 'owner-repo-1', headSha: guardedInput.head,
+      baseSha: 'b'.repeat(40), guardedInput, attempt: 1, round: 1 };
+    await expect(retainOrdinaryLaunchInputs(options)).rejects.toThrow('retained_review_work_too_large');
+    expect(await readdir(gitCommonDir)).toEqual([]);
+    const first = await retainOrdinaryLaunchInputs({ ...options,
+      guardedInputCapacity: MAX_GUARDED_INPUT_CAPACITY });
+    const bytes = await readFile(first.path, 'utf8');
+    expect(Buffer.byteLength(bytes)).toBeGreaterThan(20 * 1024 * 1024);
+    expect(JSON.parse(bytes).guardedInput.capacity).toEqual(MAX_GUARDED_INPUT_CAPACITY);
+    const narrower = { ...MAX_GUARDED_INPUT_CAPACITY, retainedBytes: 24 * 1024 * 1024 };
+    const second = await retainOrdinaryLaunchInputs({ ...options, guardedInputCapacity: narrower });
+    expect(second.path).not.toBe(first.path);
+    expect(await readFile(first.path, 'utf8')).toBe(bytes);
+    await expect(retainOrdinaryLaunchInputs({ ...options,
+      guardedInputCapacity: { ...narrower, retainedBytes: 21 * 1024 * 1024 } }))
+      .rejects.toThrow('retained_review_work_too_large');
+  }, 30_000);
+
+  it('preserves the authenticated selected capacity when exporting a pending capture', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ordinary-opted-export-')); dirs.push(root);
+    const gitCommonDir = join(root, 'native'); await mkdir(gitCommonDir);
+    const target = 'owner-repo-1', headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40);
+    const descriptor = { model: 'openai/async', role: 'general', provider: 'openai' };
+    const guardedInput = { head: headSha, kind: 'pr', repo: 'owner/repo', pr: 1,
+      diff: 'c'.repeat(64), config: 'd'.repeat(64),
+      roster: [{ ...descriptor, lane: 'async' }], prompts: [], asyncRoles: [{ name: 'general' }] };
+    const inputSha256 = guardedInputSha256(guardedInput);
+    const retained = await retainOrdinaryLaunchInputs({ gitCommonDir, target, headSha, baseSha,
+      guardedInput, attempt: 1, round: 1, guardedInputCapacity: MAX_GUARDED_INPUT_CAPACITY });
+    await claimConvergeAttempt({ gitCommonDir, target, recordPid: 999_999 });
+    await mkdir(join(gitCommonDir, 'rcl-converge-runs'));
+    await writeFile(convergeRunStatePath(gitCommonDir, target), JSON.stringify({ version: 1, target,
+      roundCap: 15, rounds: [], findings: {}, updatedAt: '2026-10-04T00:00:00.000Z',
+      lastLaunch: { status: 'pending', attempt: 1, round: 1, headSha, inputSha256,
+        startedAt: '2026-10-04T00:00:00.000Z', pid: 999_999,
+        ordinaryInputs: { version: 1, packetSha256: retained.sha256, baseSha } } }));
+    const asyncStoreDir = join(root, 'async'); await mkdir(asyncStoreDir);
+    await writeFile(join(asyncStoreDir, 'result-opted-fixture.json'), JSON.stringify({ ...descriptor,
+      status: 'success', findings: [], raw: '', durationMs: 1, async: true }));
+    const options = { gitCommonDir, target, headSha, baseSha, expectedBaseSha: baseSha,
+      guardedInput, asyncStoreDir, asyncTargetKey: 'opted', asyncDescriptors: [descriptor],
+      path: join(root, 'pending.json'), preview: false };
+    const receipt = await exportOrdinaryPendingPackage({ ...options,
+      guardedInputCapacity: MAX_GUARDED_INPUT_CAPACITY });
+    const bytes = await readFile(options.path, 'utf8');
+    const packet = JSON.parse(bytes);
+    expect(receipt.packageSha256).toBe(sha256Hex(bytes));
+    expect(packet.guardedInput.capacity).toEqual(MAX_GUARDED_INPUT_CAPACITY);
+    expect(ordinaryPendingGuardedInput(packet)).toEqual(guardedInput);
+    await expect(exportOrdinaryPendingPackage({ ...options, preview: true,
+      guardedInputCapacity: { ...MAX_GUARDED_INPUT_CAPACITY, retainedBytes: 32 * 1024 * 1024 } }))
+      .rejects.toThrow('pending_export_retained_input_mismatch');
+  });
 
   it('preserves the abandoned capture when only the base changes before the claim', async () => {
     const gitCommonDir = await mkdtemp(join(tmpdir(), 'ordinary-base-orphan-')); dirs.push(gitCommonDir);
