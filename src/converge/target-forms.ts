@@ -34,13 +34,13 @@ function looksLikeUnsupportedReference(target: string): boolean {
  * as `owner/repo#N`, so a URL reads a round launched under that short form.
  * Any other value is its own and only key.
  */
-export function convergeTargetCandidates(input: string): { key: string; aliases: string[] } {
+export function convergeTargetCandidates(input: string): { key: string; aliases: string[]; owner?: string } {
   const key = input.trim();
   if (!isGitHubTarget(key)) return { key, aliases: [] };
   const { owner, repo, number } = parseGitHubTarget(key);
   const slug = `${repo.replace(/[^A-Za-z0-9._-]+/g, '-')}-${number}`;
   const aliases = [...new Set([slug, `${repo.toLowerCase()}-${number}`, `${owner}/${repo}#${number}`])].filter(alias => alias !== key);
-  return { key, aliases };
+  return { key, aliases, owner };
 }
 
 /** Whether the value is a reference form that cannot resolve to a key, so a miss must refuse instead of reading as idle. */
@@ -85,8 +85,9 @@ async function recordedTarget(path: string): Promise<string> {
 /**
  * The `owner/repo#N` keys a `<repo>-<N>` slug stands for, read from the targets
  * the repository already recorded: a slug names no owner, so the keys cannot be
- * derived, only found. One git common dir holds one repository's pull requests,
- * so a repository-only match is the same pull request.
+ * derived, only found. A request that names an owner keeps only that owner's
+ * keys; a bare slug that matches more than one owner's refuses as ambiguous
+ * instead of picking the latest.
  *
  * The state file name carries the target's sanitized slug, which narrows the
  * candidates before any file is opened. A name cut at the length limit may have
@@ -96,7 +97,7 @@ async function recordedTarget(path: string): Promise<string> {
  * throws: a miss or a stale answer built on a failed discovery would read as a
  * round that was never launched or is not the latest.
  */
-export async function recordedReferenceKeys(gitCommonDir: string, input: string): Promise<string[]> {
+export async function recordedReferenceKeys(gitCommonDir: string, input: string, owner?: string): Promise<string[]> {
   const slug = /^(.+)-(\d+)$/.exec(input.trim());
   if (!slug) return [];
   const [, repo, number] = slug as unknown as [string, string, string];
@@ -116,7 +117,10 @@ export async function recordedReferenceKeys(gitCommonDir: string, input: string)
       throw error;
     });
     const reference = target === undefined ? null : RECORDED_REFERENCE_KEY.exec(target);
-    if (reference && reference[2]!.toLowerCase() === repo.toLowerCase() && reference[3] === number) keys.add(target!);
+    if (reference && reference[2]!.toLowerCase() === repo.toLowerCase() && reference[3] === number
+      && (owner === undefined || reference[1]!.toLowerCase() === owner.toLowerCase())) keys.add(target!);
   }
+  const owners = new Set([...keys].map(key => key.slice(0, key.indexOf('/')).toLowerCase()));
+  if (owners.size > 1) throw new Error(`converge_target_ambiguous: "${input.trim()}" matches recorded rounds of ${[...keys].join(', ')}. Name the pull request as owner/repo#N.`);
   return [...keys];
 }

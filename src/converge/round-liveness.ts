@@ -148,12 +148,15 @@ function recordedAt(liveness: RoundLiveness): string | undefined {
  * (RCL-235).
  */
 export async function inspectRoundLiveness(options: RoundLivenessOptions): Promise<RoundLiveness> {
-  const { key, aliases: derived } = convergeTargetCandidates(options.target);
+  const { key, aliases: derived, owner } = convergeTargetCandidates(options.target);
   const literal = await inspectTargetLiveness({ ...options, target: key });
-  // A failed listing or read is unknown state, never a miss and never a reason to trust the key that was found, so it throws.
+  // A key that is not a pull request reference and holds a round is a free-form key that answers for itself
+  // (`rcl-7` is not `owner/rcl#7`). Otherwise a failed listing or read is unknown state, never a miss and never a
+  // reason to trust the key that was found, so it throws.
   // A pull request reference looks its recorded keys up through its slug, which names the repository and number
   // without the casing of the owner or repository the caller typed.
-  const discovered = await recordedReferenceKeys(options.gitCommonDir, derived[0] ?? key);
+  const discovered = derived.length === 0 && recordedAt(literal) !== undefined ? []
+    : await recordedReferenceKeys(options.gitCommonDir, derived[0] ?? key, owner);
   const aliases = [...new Set([...derived, ...discovered])].filter(alias => alias !== key);
   const answers = [literal, ...await Promise.all(aliases.map(alias => inspectTargetLiveness({ ...options, target: alias })))];
   const recorded = answers.filter(answer => recordedAt(answer) !== undefined)

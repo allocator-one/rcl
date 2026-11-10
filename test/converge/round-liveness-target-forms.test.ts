@@ -144,9 +144,9 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
       target: slug, status: 'completed' });
   });
 
-  it('fails instead of answering from an older key when a cut name that may be this pull request cannot be read', async () => {
+  it('fails instead of reporting a miss when a cut name that may be this pull request cannot be read', async () => {
     const dir = await commonDir();
-    await completedRound(dir, slug);
+    await mkdir(join(dir, 'rcl-converge-runs'));
     await writeFile(join(dir, 'rcl-converge-runs', `${'o'.repeat(39)}-allocato-${'0'.repeat(16)}.json`), 'not json');
 
     await expect(inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).rejects.toThrow('converge_state_unreadable');
@@ -157,6 +157,26 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
     await writeFile(join(dir, 'rcl-converge-runs'), 'not a directory'); // a listing error that is not a missing directory
 
     await expect(inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).rejects.toThrow();
+  });
+
+  it('does not read another owner\'s round for a reference or a slug that names two', async () => {
+    const dir = await commonDir();
+    await completedRound(dir, 'someone/allocator-one#17256');
+
+    expect(await inspectRoundLiveness({ gitCommonDir: dir, target: 'allocator-one/allocator-one#17256', headSha }))
+      .toMatchObject({ status: 'not_launched' });
+    await completedRound(dir, 'other/allocator-one#17256');
+    await expect(inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).rejects.toThrow('converge_target_ambiguous');
+  });
+
+  it('answers a free-form key from its own round, not a same-numbered pull request', async () => {
+    const dir = await commonDir();
+    await completedRound(dir, 'rcl-7');
+    await new Promise(resolve => setTimeout(resolve, 5)); // timing is the behavior: the pull request round is the later launch
+    await completedRound(dir, 'allocator-one/rcl#7');
+
+    expect(await inspectRoundLiveness({ gitCommonDir: dir, target: 'rcl-7', headSha })).toMatchObject({
+      target: 'rcl-7', status: 'completed' });
   });
 
   it('keeps every other key as its own and only candidate', () => {
@@ -184,5 +204,5 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
     expect(JSON.parse(bySlug.stdout)).toMatchObject({ target: slug, status: 'completed' });
     expect(refused.status).toBe(3);
     expect(refused.stderr).toContain('converge_target_form_unsupported');
-  });
+  }, 60_000); // three tsx CLI processes
 });
