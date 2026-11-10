@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Make `rcl converge-status` resolve a pull request by every form it accepts
+  (RCL-235). `--target owner/repo#N` or a pull request URL reported
+  `not_launched` for a round that was recorded under the `<repo>-<N>` slug, so
+  a lane using that form would relaunch a live round or wait on a dead one. A
+  pull request reference now also reads the slug and `owner/repo#N` keys and
+  answers from the one with the latest launch; a slug reads only its own key,
+  so query the key the round launched under. `--json` adds `requestedTarget`
+  when the answer came from another key than the one passed. A reference that
+  names no key (`#N`, a bare number, an issue URL) is refused with
+  `converge_target_form_unsupported` instead of reading as not launched.
+
 ## 4.5.34 - 2026-11-10
 
 - Leave generated paths out of the reviewed patch of a PR (RCL-209). A release

@@ -441,6 +441,19 @@ target lock from preflight until it writes its terminal record, so:
 | `failed` | The launch recorded a failure; inspect it before any retry | 0 |
 | `idle` | No guarded launch is recorded (without `--head`) | 0 |
 
+`--target` takes the key the round launched under: query that key. A pull
+request named as `owner/repo#N` or by its URL also reads the other keys it
+launches under, the `<repo>-<N>` slug and `owner/repo#N`, and the key with the
+latest launch answers; `target` in the output is the key read and
+`requestedTarget` the value passed. A `<repo>-<N>` slug reads only its own
+key. It cannot tell a pull request's slug from a free-form key such as
+`rcl-7`, so it never looks up the `owner/repo#N` rounds of a repository, and a
+round launched under `owner/repo#N` is read by naming `owner/repo#N` or the
+pull request URL. A reference that names no key (`#N`, a bare number, an issue
+URL, a malformed `owner/repo#`) is refused with
+`converge_target_form_unsupported` and exit 3 instead of reporting
+`not_launched`, unless a round is recorded under that exact key.
+
 `--wait <minutes>` polls every `--interval` seconds (30 by default) while the
 round is running and returns as soon as it finishes or dies, so a caller can
 wait on that instead of on a report that may never arrive. For `dead`, rerun
