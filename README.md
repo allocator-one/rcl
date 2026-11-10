@@ -657,7 +657,8 @@ reviewers (default `low`, a supported level for the default Kimi K3, which
 advertises `low`, `high` and `max` — avoid `medium` for it). Check the
 selected model's supported levels before overriding: unbounded reasoning makes
 these models spend the whole completion budget thinking before they answer.
-Direct OpenAI reviewers get `openaiReasoningEffort` (default `high`). On a
+Direct OpenAI reasoning models (gpt-5 and later, o-series) get
+`openaiReasoningEffort` (default `high`); older models get none. On a
 20-round replay, high caught more verifier-confirmed findings than Sol's provider
 default and still finished inside Opus's window (RCL-240). Gemini reviewers use
 their provider default. Opus 5.5 reviews

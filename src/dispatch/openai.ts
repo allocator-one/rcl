@@ -26,7 +26,7 @@ export class OpenAIAdapter implements ReviewAdapter {
   provider = 'openai';
 
   private client: OpenAI;
-  /** Omitted from review requests when unset, so the model's own default applies. */
+  /** Omitted when unset, and for non-reasoning models, so their own default applies. */
   private reviewReasoningEffort: ReasoningEffort | undefined;
 
   constructor(apiKey?: string, baseUrl?: string, opts?: { reviewReasoningEffort?: ReasoningEffort }) {
@@ -67,7 +67,8 @@ export class OpenAIAdapter implements ReviewAdapter {
               { role: 'user', content: userPrompt },
             ],
             response_format: { type: 'json_object' },
-            ...(this.reviewReasoningEffort ? { reasoning_effort: this.reviewReasoningEffort } : {}),
+            // Only reasoning models (the same gpt-5+/o-series family) accept the parameter.
+            ...(this.reviewReasoningEffort && usesCompletionTokens ? { reasoning_effort: this.reviewReasoningEffort } : {}),
             ...(usesCompletionTokens
               ? { max_completion_tokens: 16384 }
               : { max_tokens: 16384 }),
