@@ -37,7 +37,7 @@ import { createGitHubClient, getGitHubPullRequest } from './resolver/github-clie
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
 import { loadPlanAsDiff } from './resolver/plan.js';
-import { isPlanFocus, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js';
+import { isPlanFocus, PLAN_DEFAULT_FOCUS, PLAN_FOCUS_CHOICES, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js';
 import { chunkDiff } from './prepare/chunker.js';
 import { buildPrompt, loadContextDocs as loadPromptContextDocs } from './prepare/prompt-builder.js';
 import { buildTaskContext } from './prepare/task-context.js';
@@ -408,7 +408,7 @@ program
 program
   .command('review-plan <file>')
   .description('Council-review an implementation plan document before code exists')
-  .option('--focus <mode>', `Focus the review: ${PLAN_FOCUS_MODES.join(' | ')} (default: comprehensive)`)
+  .option('--focus <mode>', `Focus the review: ${PLAN_FOCUS_MODES.join(' | ')} (default: ${PLAN_DEFAULT_FOCUS})`)
   .option('--role <name>', 'Use a single named role')
   .option('--roles <names>', 'Comma-separated list of roles')
   .option(
@@ -3243,7 +3243,7 @@ async function executeCouncil(
       ...(prepared.spec ? { spec: prepared.spec } : {}),
       contextFiles: contextDocs.map((d) => ({ path: d.label, sha256: d.sha256 })),
       // Record the effective focus that shaped the plan prompts.
-      ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? 'comprehensive' } } : {}),
+      ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? PLAN_DEFAULT_FOCUS } } : {}),
       runner: detectRunner(process.env, hostname()),
       startedAt: extra.pendingResume
         ? new Date(extra.pendingResume.launch.startedAtMs)
@@ -3608,10 +3608,12 @@ async function runPlanReview(
     assertEvidenceCanBeRequired(opts);
 
     let focus: PlanFocus | undefined;
-    if (opts.focus) {
+    // The default is accepted by name but stays "no focus", so an explicit
+    // `--focus comprehensive` runs the same prompts as omitting the flag.
+    if (opts.focus && opts.focus !== PLAN_DEFAULT_FOCUS) {
       if (!isPlanFocus(opts.focus)) {
         spinner.fail(
-          `Invalid --focus "${opts.focus}". Use one of: ${PLAN_FOCUS_MODES.join(', ')}.`
+          `Invalid --focus "${opts.focus}". Use one of: ${PLAN_FOCUS_CHOICES.join(', ')}.`
         );
         process.exit(1);
       }

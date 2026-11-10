@@ -3,6 +3,14 @@ import { OUTPUT_SCHEMA } from './base.js';
 export const PLAN_FOCUS_MODES = ['feasibility', 'completeness', 'risks', 'timeline'] as const;
 export type PlanFocus = (typeof PLAN_FOCUS_MODES)[number];
 
+/**
+ * What a plan review does without --focus: the unfocused prompt covering every
+ * mode. It is accepted by name so the default `--help` advertises can be passed
+ * explicitly, and it is not a PlanFocus: it selects no focus prompt.
+ */
+export const PLAN_DEFAULT_FOCUS = 'comprehensive';
+export const PLAN_FOCUS_CHOICES = [...PLAN_FOCUS_MODES, PLAN_DEFAULT_FOCUS] as const;
+
 export function isPlanFocus(value: string): value is PlanFocus {
   return (PLAN_FOCUS_MODES as readonly string[]).includes(value);
 }

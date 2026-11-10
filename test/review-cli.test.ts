@@ -262,6 +262,27 @@ describe('rcl review — files-only --context contract (RCL-190)', () => {
   });
 });
 
+describe('rcl review-plan — --focus default (RCL-55)', () => {
+  it('accepts the default its own help advertises', () => {
+    const directory = tempRepository();
+    const help = runRcl(['review-plan', '--help'], directory).stdout.replace(/\s+/g, ' ');
+    const advertised = /--focus <mode>.*\(default: (\w+)\)/.exec(help)?.[1];
+    expect(advertised).toBe('comprehensive');
+    writeFileSync(join(directory, 'plan.md'), '# Plan\n\nShip it.\n');
+    // No provider is configured, so the run stops later; the focus check comes first.
+    const result = runRcl(['review-plan', 'plan.md', '--focus', advertised!], directory);
+    expect(result.stderr).not.toContain('Invalid --focus');
+  }, 30_000);
+
+  it('still rejects an unknown focus and names the accepted values', () => {
+    const directory = tempRepository();
+    writeFileSync(join(directory, 'plan.md'), '# Plan\n');
+    const result = runRcl(['review-plan', 'plan.md', '--focus', 'vibes'], directory);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/Invalid --focus "vibes"\. Use one of: .*comprehensive/);
+  });
+});
+
 describe('rcl review — shared task context (RCL-191)', () => {
   it('gives every reviewer, not only spec-compliance, the specification', async () => {
     await withGuardedFixture(async fixture => {

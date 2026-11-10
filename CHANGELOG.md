@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Accept `comprehensive` for `rcl review-plan --focus` (RCL-55). `--help` named it
+  as the default, but the validator rejected it. It now runs the same unfocused
+  prompts as omitting the flag, and the error lists it with the other modes.
+
 ## 4.5.41 - 2026-11-10
 
 - Keep provider calls on HTTP/1.1 under Node's environment proxy (RCL-233). With
