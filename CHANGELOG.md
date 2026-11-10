@@ -17,8 +17,8 @@
   limit. A patch filename that validly contains U+FFFD, written by Git as octal
   UTF-8 bytes, is accepted; only a raw replacement character is refused. The pinned diff also ignores a
   repository-local `diff.ignoreSubmodules`, so submodule changes stay in the patch.
-  A local Git timeout or output-limit failure while checking ancestry keeps its own
-  refusal instead of selecting hosted acquisition. A patchless binary, mode-only or
+  A local Git timeout or output-limit failure while reading the origin or checking
+  ancestry keeps its own refusal instead of selecting hosted acquisition. A patchless binary, mode-only or
   pure-rename change is certified under either Git path quoting, and an attested PR
   review refuses `--max-review-chunks` and `--max-blocking-calls` unless the
   exact-head label grant supplies the same values.

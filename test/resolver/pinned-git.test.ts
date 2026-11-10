@@ -145,12 +145,13 @@ describe('pinned PR Git patches', () => {
     expect(diff.mergeBaseSha).toBe(baseSha);
   });
 
-  it.skipIf(process.platform === 'win32')('does not offer hosted acquisition after a local Git output-limit failure', async () => {
+  it.skipIf(process.platform === 'win32').each(['--is-shallow-repository', 'remote.origin.url'])(
+    'does not offer hosted acquisition after a local Git output-limit failure reading %s', async (probe) => {
     // An operational failure is not a missing object: it must keep its own
     // refusal instead of selecting the hosted fallback.
     const shimDir = await mkdtemp(join(tmpdir(), 'rcl-pinned-shim-'));
     const realGit = (await exec('sh', ['-c', 'command -v git'])).stdout.trim();
-    await writeFile(join(shimDir, 'git'), `#!/bin/sh\ncase " $* " in *" --is-shallow-repository "*) head -c 20000 /dev/zero | tr '\\0' x; exit 0;; esac\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o700 });
+    await writeFile(join(shimDir, 'git'), `#!/bin/sh\ncase " $* " in *" ${probe} "*) head -c 20000 /dev/zero | tr '\\0' x; exit 0;; esac\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o700 });
     const originalPath = process.env['PATH'];
     process.env['PATH'] = `${shimDir}:${originalPath ?? ''}`;
     try {

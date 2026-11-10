@@ -119,6 +119,16 @@ export interface PinnedGitDiffOptions {
 /** Only unavailable local objects permit a hosted acquisition retry. */
 export class PinnedGitObjectsUnavailableError extends Error {}
 
+/**
+ * A timeout, output limit or missing git binary is an operational failure, not
+ * proof that objects or the origin are absent, and must not select hosted
+ * acquisition. A Git exit status (numeric code) is a real answer and does not.
+ */
+function rethrowOperationalGitFailure(error: unknown): void {
+  const failure = error as { killed?: unknown; signal?: unknown; code?: unknown };
+  if (failure.killed === true || typeof failure.signal === 'string' || typeof failure.code === 'string') throw error;
+}
+
 function validateDiffCapacity(requested?: number): number {
   const maxBytes = requested ?? MAX_DIFF_BYTES;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_PINNED_DIFF_BYTES) {
@@ -178,7 +188,10 @@ export async function loadPinnedGitDiff(options: PinnedGitDiffOptions): Promise<
   };
   let remote: string;
   try { remote = (await readGit(['config', '--get', 'remote.origin.url'])).trim(); }
-  catch { throw new PinnedGitObjectsUnavailableError('Pinned PR repository mismatch: a matching local GitHub origin is required.'); }
+  catch (error) {
+    rethrowOperationalGitFailure(error);
+    throw new PinnedGitObjectsUnavailableError('Pinned PR repository mismatch: a matching local GitHub origin is required.');
+  }
   if (githubRepository(remote) !== `${options.owner}/${options.repo}`.toLowerCase()) {
     throw new PinnedGitObjectsUnavailableError('Pinned PR repository mismatch: the local origin does not identify the requested GitHub repository.');
   }
@@ -193,10 +206,7 @@ export async function loadPinnedGitDiff(options: PinnedGitDiffOptions): Promise<
     mergeBaseSha = (await readGit(['merge-base', '--all', options.baseSha, options.headSha])).trim();
     if (!FULL_OBJECT_ID.test(mergeBaseSha)) throw new Error('ambiguous or missing merge base');
   } catch (error) {
-    // A timeout, output limit or missing git binary is an operational failure,
-    // not proof that objects are absent, and must not select hosted acquisition.
-    const failure = error as { killed?: unknown; signal?: unknown; code?: unknown };
-    if (failure.killed === true || typeof failure.signal === 'string' || typeof failure.code === 'string') throw error;
+    rethrowOperationalGitFailure(error);
     throw new PinnedGitObjectsUnavailableError('Pinned PR diff requires both exact commits and one unambiguous merge base in a complete local repository.');
   }
   if (options.expectedMergeBaseSha !== undefined && options.expectedMergeBaseSha !== mergeBaseSha) {
