@@ -19,6 +19,22 @@ export interface FindingRetriageOptions {
   submit?: boolean;
 }
 
+/**
+ * An empty path resolves to the working directory, as an unset variable under `env -i` produces, and
+ * `/dev/stdin` is a directory when the caller's stdin is one; both read as a bare EISDIR (RCL-217).
+ */
+async function readReasonFile(path: string, given: string): Promise<Buffer> {
+  if (given.trim() === '') throw new Error('--reason-file needs the path of a UTF-8 file; the path given is empty (an unset variable under env -i?).');
+  try {
+    return await readFile(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EISDIR') {
+      throw new Error('--reason-file must name a file, not a directory (a directory stdin behind /dev/stdin counts). rcl reads no stdin; pass a regular file.');
+    }
+    throw err;
+  }
+}
+
 /** Preview or send one fresh verdict; no native writes, review, outbox or historical replay. */
 export async function runFindingRetriage(options: FindingRetriageOptions, deps: EvidenceDeps): Promise<number> {
   let pr;
@@ -28,7 +44,7 @@ export async function runFindingRetriage(options: FindingRetriageOptions, deps: 
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(options.run) ||
         !/^[a-f0-9]{64}$/.test(options.reportSha256)) throw new Error('Retriage requires an explicit run UUID and lower-case report SHA-256.');
     reason = new TextDecoder('utf-8', { fatal: true })
-      .decode(await readFile(resolve(deps.cwd ?? process.cwd(), options.reasonFile))).trim();
+      .decode(await readReasonFile(resolve(deps.cwd ?? process.cwd(), options.reasonFile), options.reasonFile)).trim();
     if (!reason || reason.length > MAX_FREE_TEXT) throw new Error('Retriage requires an explicit reason of 1 to 2000 characters.');
   } catch (err) {
     deps.stderr(text(err instanceof Error ? err.message : String(err), 400));
