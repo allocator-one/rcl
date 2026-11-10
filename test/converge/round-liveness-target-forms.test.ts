@@ -1,5 +1,5 @@
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,6 +106,23 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
 
     expect(await inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).toMatchObject({
       target: slug, status: 'not_launched' });
+  });
+
+  it('finds an owner/repo#N round whose state file name was cut inside the repository name', async () => {
+    const dir = await commonDir();
+    const reference = `${'o'.repeat(39)}/allocator-one#17256`; // the 48 character name slug ends at `allocator`
+    await completedRound(dir, reference);
+
+    expect(await inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).toMatchObject({
+      target: reference, requestedTarget: slug, status: 'completed' });
+  });
+
+  it('fails a slug status instead of reporting a miss when a candidate state file cannot be read', async () => {
+    const dir = await commonDir();
+    await mkdir(join(dir, 'rcl-converge-runs'));
+    await writeFile(join(dir, 'rcl-converge-runs', `owner-allocator-one-17256-${'0'.repeat(16)}.json`), 'not json');
+
+    await expect(inspectRoundLiveness({ gitCommonDir: dir, target: slug, headSha })).rejects.toThrow('converge_state_unreadable');
   });
 
   it('fails a slug status instead of reporting a miss when the recorded keys cannot be listed', async () => {

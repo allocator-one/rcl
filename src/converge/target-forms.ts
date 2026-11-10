@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { open, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { isGitHubTarget, parseGitHubTarget } from '../resolver/github.js';
 import { convergeRunStatePath } from './run-state.js';
@@ -51,7 +51,20 @@ export function isUnsupportedConvergeTargetForm(input: string): boolean {
 
 const STATE_NAME_SLUG_LIMIT = 48; // run-state.ts stateBaseName cuts the slug here, then appends `-` and a 16 digit hash and `.json`
 const STATE_NAME_CUT_LENGTH = STATE_NAME_SLUG_LIMIT + '-'.length + 16 + '.json'.length;
+const STATE_HEADER_BYTES = 1024; // run-state.ts writes `version` then `target` first, so the key sits in the first lines
+const STATE_HEADER_TARGET = /"target"\s*:\s*"((?:[^"\\]|\\.)*)"/;
 const RECORDED_REFERENCE_KEY = /^([^/#\s]+)\/([^/#\s]+)#(\d+)$/;
+
+/** The `target` a state file records, read from its first bytes so a long file costs no more than a short one. */
+async function recordedTarget(path: string): Promise<string> {
+  const file = await open(path, 'r');
+  try {
+    const { bytesRead, buffer } = await file.read(Buffer.alloc(STATE_HEADER_BYTES), 0, STATE_HEADER_BYTES, 0);
+    const found = STATE_HEADER_TARGET.exec(buffer.toString('utf8', 0, bytesRead));
+    if (!found) throw new Error(`converge_state_unreadable: no target in the first ${STATE_HEADER_BYTES} bytes of ${path}`);
+    return JSON.parse(`"${found[1]}"`) as string;
+  } finally { await file.close(); }
+}
 
 /**
  * The `owner/repo#N` keys a `<repo>-<N>` slug stands for, read from the targets
@@ -60,31 +73,32 @@ const RECORDED_REFERENCE_KEY = /^([^/#\s]+)\/([^/#\s]+)#(\d+)$/;
  * so a repository-only match is the same pull request.
  *
  * The state file name carries the target's sanitized slug, which narrows the
- * candidates before any file is opened; a name cut at the length limit may hide
- * the number, so it stays a candidate when it still names the repository. The
- * recorded `target` decides.
+ * candidates before any file is opened. A name cut at the length limit may have
+ * lost any part of the repository or the number, so every cut name stays a
+ * candidate; the recorded `target` decides, read one file at a time from its
+ * first bytes. A listing or read that fails throws: a miss built on a failed
+ * discovery would read as a round that was never launched.
  */
 export async function recordedReferenceKeys(gitCommonDir: string, input: string): Promise<string[]> {
   const slug = /^(.+)-(\d+)$/.exec(input.trim());
   if (!slug) return [];
   const [, repo, number] = slug as unknown as [string, string, string];
   const directory = dirname(convergeRunStatePath(gitCommonDir, input.trim()));
-  // Only a missing directory is an empty one: any other failure means the recorded keys are unknown, and an
-  // answer built on that would read as a reliable miss.
   const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return [] as string[];
+    if (error.code === 'ENOENT') return [] as string[]; // only a missing directory is an empty one
     throw error;
   });
   const repoSlug = repo.toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
-  const candidates = names.filter(name => name.endsWith('.json') && (name.toLowerCase().includes(`-${repoSlug}-${number}-`)
-    || (name.length >= STATE_NAME_CUT_LENGTH && name.toLowerCase().includes(`-${repoSlug}`))));
-  const keys: Array<string | undefined> = [];
-  for (const name of candidates) { // one at a time: a status poll must not open every long-named state file at once
-    try {
-      const { target } = JSON.parse(await readFile(join(directory, name), 'utf8')) as { target?: unknown };
-      const reference = typeof target === 'string' ? RECORDED_REFERENCE_KEY.exec(target) : null;
-      keys.push(reference && reference[2]!.toLowerCase() === repo.toLowerCase() && reference[3] === number ? target as string : undefined);
-    } catch { keys.push(undefined); } // an unreadable or foreign file is not this target's record
+  const candidates = names.filter(name => name.endsWith('.json')
+    && (name.length >= STATE_NAME_CUT_LENGTH || name.toLowerCase().includes(`-${repoSlug}-${number}-`)));
+  const keys = new Set<string>();
+  for (const name of candidates) {
+    const target = await recordedTarget(join(directory, name)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined; // removed since the listing
+      throw error;
+    });
+    const reference = target === undefined ? null : RECORDED_REFERENCE_KEY.exec(target);
+    if (reference && reference[2]!.toLowerCase() === repo.toLowerCase() && reference[3] === number) keys.add(target!);
   }
-  return [...new Set(keys.filter((key): key is string => key !== undefined))];
+  return [...keys];
 }
