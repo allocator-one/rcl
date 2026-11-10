@@ -3002,6 +3002,7 @@ async function executeCouncil(
             timeoutMs: config.asyncTimeout ?? DEFAULT_ASYNC_TIMEOUT_MS,
             maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
             reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+            openaiReasoningEffort: config.openaiReasoningEffort,
           }
         );
         launchAsyncWorkers(spools);
@@ -3096,6 +3097,7 @@ async function executeCouncil(
         // legacy config digests. Explicit caps remain source-bound inputs.
         providerConcurrency,
         reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+        openaiReasoningEffort: config.openaiReasoningEffort,
         // Quorum closure (RCL-26, RCL-136): the round stops waiting once the
         // configured fraction of blocking seats completed every chunk — the
         // same seats and policy as the report's blocking health and the

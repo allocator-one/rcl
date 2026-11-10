@@ -258,6 +258,7 @@ export const DIGESTED_CONFIG_FIELDS = [
   'concurrency',
   'providerConcurrency',
   'reasoningEffort',
+  'openaiReasoningEffort',
   'context',
   'spec',
   'focus',

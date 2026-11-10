@@ -92,6 +92,7 @@ export async function executeCapturedOriginal(input: OriginalExecutionOptions): 
       concurrency: captured.config.concurrency ?? DEFAULT_CONCURRENCY,
       providerConcurrency: captured.config.providerConcurrency,
       reasoningEffort: captured.config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+      openaiReasoningEffort: captured.config.openaiReasoningEffort,
       adapterFactory: options.adapterFactory, signal: options.signal,
       onPhysicalReviewComplete: options.onPhysicalReviewComplete,
       auditLateReview: options.auditLateReview, auditLateAttempt: options.auditLateAttempt,

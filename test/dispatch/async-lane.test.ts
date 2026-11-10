@@ -237,6 +237,18 @@ describe('spool → worker → collect round trip', () => {
     expect(await collectAsyncResults(dir, targetKey)).toHaveLength(0);
   });
 
+  it('carries the OpenAI review effort to the detached worker', async () => {
+    const spools = await spoolAsyncCalls([spec], {
+      storeDir: dir,
+      targetKey: asyncTargetKey('repo#1'),
+      timeoutMs: 1000,
+      maxRetries: 0,
+      openaiReasoningEffort: 'high',
+    });
+
+    expect(JSON.parse(await readFile(spools[0]!, 'utf8'))).toHaveProperty('openaiReasoningEffort', 'high');
+  });
+
   it('snapshots completed results without consuming them for same-attempt recovery', async () => {
     const targetKey = asyncTargetKey('repo#resume');
     await publishAsyncReview(dir, targetKey, {
