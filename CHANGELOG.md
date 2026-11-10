@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 4.5.42 - 2026-11-10
+
+- Admit explicitly bounded full-patch reviews above the ordinary 32-chunk limit
+  while preserving the default limits, exact input retention, guarded review
+  accounting, and complete-seat checks. For large pull requests, verify the
+  repository and exact commits and read the full pinned Git diff before any
+  paid dispatch; incomplete GitHub file patches fail closed. The hosted gate
+  accepts a capacity grant of three labels, `rcl-cap/<head-sha>`,
+  `rcl-cap-chunks/<n>` and `rcl-cap-calls/<n>`, each last applied by a
+  repository writer, without changing the default workflow (RCL-162). The limits
+  are the label names, never a description, which anyone with label-edit rights
+  could change after the approval; the issue timeline records who applied each
+  limit. A patch filename that validly contains U+FFFD, written by Git as octal
+  UTF-8 bytes, is accepted; only a raw replacement character is refused. The pinned diff also ignores a
+  repository-local `diff.ignoreSubmodules`, so submodule changes stay in the patch.
+  A local Git timeout or output-limit failure while checking ancestry keeps its own
+  refusal instead of selecting hosted acquisition.
+
 ## 4.5.41 - 2026-11-10
 
 - Keep provider calls on HTTP/1.1 under Node's environment proxy (RCL-233). With
@@ -21,24 +39,6 @@
   (`prepack`, removed again by `postpack`) and the release job refuses a
   tarball without it. npm applies it to registry installs; a local tarball
   install ignores it, see AGENTS.md.
-
-## 4.5.41 - 2026-11-10
-
-- Admit explicitly bounded full-patch reviews above the ordinary 32-chunk limit
-  while preserving the default limits, exact input retention, guarded review
-  accounting, and complete-seat checks. For large pull requests, verify the
-  repository and exact commits and read the full pinned Git diff before any
-  paid dispatch; incomplete GitHub file patches fail closed. The hosted gate
-  accepts a capacity grant of three labels, `rcl-cap/<head-sha>`,
-  `rcl-cap-chunks/<n>` and `rcl-cap-calls/<n>`, each last applied by a
-  repository writer, without changing the default workflow (RCL-162). The limits
-  are the label names, never a description, which anyone with label-edit rights
-  could change after the approval; the issue timeline records who applied each
-  limit. A patch filename that validly contains U+FFFD, written by Git as octal
-  UTF-8 bytes, is accepted; only a raw replacement character is refused. The pinned diff also ignores a
-  repository-local `diff.ignoreSubmodules`, so submodule changes stay in the patch.
-  A local Git timeout or output-limit failure while checking ancestry keeps its own
-  refusal instead of selecting hosted acquisition.
 
 ## 4.5.40 - 2026-11-10
 
