@@ -8,6 +8,9 @@
   waits through it. A PR-bound patch with a convergence target uses guarded
   launch when no attempt was explicitly preclaimed, so its pending and completed
   `lastLaunch` records remain visible outside review cycles too.
+
+## 4.5.36 - 2026-11-10
+
 - Resolve the temporary directories in `test/converge/fresh-review-close.test.ts`
   to their real paths (RCL-237). On macOS `os.tmpdir()` is a symlink
   (`/var/folders/…` to `/private/var/…`), so the fixtures tripped the review
