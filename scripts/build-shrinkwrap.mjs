@@ -7,6 +7,8 @@
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+const REGISTRY = 'https://registry.npmjs.org/';
+
 /** The package a dependency name resolves to from `from`, searching up through node_modules like npm does. */
 function resolve(packages, from, name) {
   let base = from;
@@ -73,9 +75,10 @@ export function buildShrinkwrap(lock, pkg) {
       pruned[path] = root;
       continue;
     }
-    // A link points at a local directory: no registry URL or hash can pin it, so it is never accepted.
-    if (entry.link || !entry.version || !entry.resolved || !entry.integrity) {
-      throw new Error(`${path} has no version, resolved URL and integrity in package-lock.json`);
+    // A link points at a local directory: no registry URL or hash can pin it, so it is never accepted. The
+    // resolved URL becomes install instructions for every consumer, so it must name the npm registry.
+    if (entry.link || !entry.version || !entry.integrity || !entry.resolved?.startsWith(REGISTRY)) {
+      throw new Error(`${path} is not pinned by version, integrity and an ${REGISTRY} URL in package-lock.json`);
     }
     pruned[path] = entry;
   }

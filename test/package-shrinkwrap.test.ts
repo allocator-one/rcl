@@ -87,6 +87,24 @@ describe('buildShrinkwrap', () => {
     expect(() => buildShrinkwrap(unpinned, pkg)).toThrow(/node_modules\/a/);
   });
 
+  it.each([
+    ['a local file', 'file:../t-1.0.0.tgz'],
+    ['another host', 'https://registry.example.com/t/-/t-1.0.0.tgz'],
+    ['a git URL', 'git+ssh://git@github.com/x/t.git#abc'],
+  ])('refuses a transitive production package resolved from %s, which consumers could not install from the registry', (_label, resolved) => {
+    const transitive = structuredClone(lock) as typeof lock & { packages: Record<string, Record<string, unknown>> };
+    transitive.packages['node_modules/a'].dependencies = { t: '^1' };
+    transitive.packages['node_modules/t'] = { version: '1.0.0', resolved, integrity: 'sha512-t' };
+    expect(() => buildShrinkwrap(transitive, pkg)).toThrow(/node_modules\/t/);
+  });
+
+  it('accepts a transitive production package from the npm registry and keeps it', () => {
+    const transitive = structuredClone(lock) as typeof lock & { packages: Record<string, Record<string, unknown>> };
+    transitive.packages['node_modules/a'].dependencies = { t: '^1' };
+    transitive.packages['node_modules/t'] = { version: '1.0.0', resolved: 'https://registry.npmjs.org/t/-/t-1.0.0.tgz', integrity: 'sha512-t' };
+    expect(Object.keys(buildShrinkwrap(transitive, pkg).packages)).toEqual(['', 'node_modules/a', 'node_modules/t']);
+  });
+
   it('refuses a production package without a version, which no hash can pin on its own', () => {
     const unversioned = structuredClone(lock);
     delete (unversioned.packages['node_modules/a'] as Record<string, unknown>).version;
