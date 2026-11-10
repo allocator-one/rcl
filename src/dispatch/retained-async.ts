@@ -65,7 +65,8 @@ export async function runRetainedAsyncWorker(bytes: string, dependencies: {
   // A pending launch need not have a runId, and later rounds cannot redirect it.
   const opinionTarget = asyncTargetKey('', delegate.target, original.opinionCycle.cycleId ?? undefined);
   await executeCheckpointAsync({ delegate,
-    adapterFactory: call => (dependencies.adapterFactory ?? (provider => defaultAdapterFactory(provider, captured.config.reasoningEffort)))(call.provider),
+    adapterFactory: call => (dependencies.adapterFactory ?? (provider => defaultAdapterFactory(provider, captured.config.reasoningEffort,
+      captured.config.openaiReasoningEffort)))(call.provider),
     onLateAuditError: (_error, attemptId) => recordAsyncLateFailure(delegate, attemptId),
   });
   const state = (await readAsyncPhase({ commonDir: delegate.commonDir, namespace: delegate.namespace,

@@ -896,6 +896,30 @@ describe('openai request parameters', () => {
     expect(captured[0]).not.toHaveProperty('max_tokens');
   });
 
+  it('reviews at the configured reasoning effort and leaves the provider default otherwise', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    const configured = new OpenAIAdapter('test-key', undefined, { reviewReasoningEffort: 'high' });
+    const unconfigured = new OpenAIAdapter('test-key');
+    setClient(configured, capturingClient(captured));
+    setClient(unconfigured, capturingClient(captured));
+
+    await configured.review('gpt-6-sol', 'general', 's', 'u', OPTS);
+    await unconfigured.review('gpt-6-sol', 'general', 's', 'u', OPTS);
+
+    expect(captured[0]).toHaveProperty('reasoning_effort', 'high');
+    expect(captured[1]).not.toHaveProperty('reasoning_effort');
+  });
+
+  it.each(['gpt-4.1', 'gpt-4o'])('%s, a non-reasoning model, reviews without reasoning_effort', async (model) => {
+    const captured: Array<Record<string, unknown>> = [];
+    const adapter = new OpenAIAdapter('test-key', undefined, { reviewReasoningEffort: 'high' });
+    setClient(adapter, capturingClient(captured));
+
+    await adapter.review(model, 'general', 's', 'u', OPTS);
+
+    expect(captured[0]).not.toHaveProperty('reasoning_effort');
+  });
+
   it('gpt-6 asks with max_completion_tokens', async () => {
     const captured: Array<Record<string, unknown>> = [];
     const adapter = new OpenAIAdapter('test-key');

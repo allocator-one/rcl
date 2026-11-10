@@ -38,6 +38,7 @@ export interface ReviewerRecoveryOptions {
   providerConcurrency?: RunnerOptions['providerConcurrency'];
   adapterFactory?: RunnerOptions['adapterFactory'];
   reasoningEffort?: RunnerOptions['reasoningEffort'];
+  openaiReasoningEffort?: RunnerOptions['openaiReasoningEffort'];
   signal?: AbortSignal;
   /**
    * Newly durable physical results only, including failures; never retained or
@@ -99,6 +100,7 @@ export async function recoverCapturedAssignments(options: CapturedRecoveryOption
       concurrency: captured.config.concurrency ?? DEFAULT_CONCURRENCY,
       providerConcurrency: captured.config.providerConcurrency,
       reasoningEffort: captured.config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+      openaiReasoningEffort: captured.config.openaiReasoningEffort,
       remainingMs: budget.remainingMs, maxAdditionalCalls: budget.maxAdditionalCalls,
       maxAttemptsPerCell: budget.maxAttemptsPerCell });
   });
@@ -221,7 +223,7 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
           providerConcurrency: input.providerConcurrency,
           // Every physical call has a durable intent; SDK/adapter retries cannot
           // happen invisibly inside this accounting boundary.
-          maxRetries: 0, reasoningEffort: input.reasoningEffort,
+          maxRetries: 0, reasoningEffort: input.reasoningEffort, openaiReasoningEffort: input.openaiReasoningEffort,
           adapterFactory: provider => {
             const adapter = adapters.get(provider);
             if (!adapter) throw new Error('recovery_missing_prepared_adapter');
@@ -255,7 +257,7 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
                 try {
                   adapters.set(assignment.provider, input.adapterFactory
                     ? input.adapterFactory(assignment.provider)
-                    : defaultAdapterFactory(assignment.provider, input.reasoningEffort));
+                    : defaultAdapterFactory(assignment.provider, input.reasoningEffort, input.openaiReasoningEffort));
                 } catch (error) {
                   setupFailuresByIndex.set(index, { model: assignment.model, role: assignment.role.name,
                     provider: assignment.provider, status: 'error', findings: [], durationMs: 0,

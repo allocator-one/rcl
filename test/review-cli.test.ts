@@ -263,16 +263,27 @@ describe('rcl review — files-only --context contract (RCL-190)', () => {
 });
 
 describe('rcl review-plan — --focus default (RCL-55)', () => {
-  it('accepts the default its own help advertises', () => {
-    const directory = tempRepository();
-    const help = runRcl(['review-plan', '--help'], directory).stdout.replace(/\s+/g, ' ');
+  it('runs the default its own help advertises exactly as omitting the flag does', async () => {
+    const help = runRcl(['review-plan', '--help'], tempRepository()).stdout.replace(/\s+/g, ' ');
     const advertised = /--focus <mode>.*\(default: (\w+)\)/.exec(help)?.[1];
     expect(advertised).toBe('comprehensive');
-    writeFileSync(join(directory, 'plan.md'), '# Plan\n\nShip it.\n');
-    // No provider is configured, so the run stops later; the focus check comes first.
-    const result = runRcl(['review-plan', 'plan.md', '--focus', advertised!], directory);
-    expect(result.stderr).not.toContain('Invalid --focus');
-  }, 30_000);
+    const promptsFor = async (focusArgs: string[]) => {
+      let prompts: string[] = [];
+      await withGuardedFixture(async fixture => {
+        writeFileSync(join(fixture.repo, 'plan.md'), '# Plan\n\nShip it.\n');
+        const result = await runRclAsync(['review-plan', 'plan.md', ...focusArgs, '--config', 'config.json',
+          '--json-file', 'report.json', '--no-telemetry'], fixture.repo, fixture.env);
+        expect(result.status, result.stderr).toBe(0);
+        prompts = fixture.requestBodies().map(body => body.messages.map(message => message.content).join('\n')).sort();
+      });
+      return prompts;
+    };
+    const omitted = await promptsFor([]);
+    const explicit = await promptsFor(['--focus', advertised!]);
+    // The council really reviewed the plan both times, and the flag changed nothing sent to a reviewer.
+    expect(omitted.length).toBeGreaterThanOrEqual(1);
+    expect(explicit).toEqual(omitted);
+  }, 60_000);
 
   it('still rejects an unknown focus and names the accepted values', () => {
     const directory = tempRepository();
