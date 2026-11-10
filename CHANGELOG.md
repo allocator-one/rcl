@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.40 - 2026-11-10
+
 - Name the problem when `rcl evidence retriage-finding --reason-file` points at a
   directory (RCL-217). An empty path, which is what an unset variable becomes in
   a launcher run under `env -i`, resolves to the working directory, and a
