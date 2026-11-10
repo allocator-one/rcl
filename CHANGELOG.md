@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.35 - 2026-11-10
+
 - Make `rcl converge-status` resolve a pull request by every form it accepts
   (RCL-235). `--target owner/repo#N` or a pull request URL reported
   `not_launched` for a round that was recorded under the `<repo>-<N>` slug, so
