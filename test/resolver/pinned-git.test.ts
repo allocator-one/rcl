@@ -27,6 +27,9 @@ describe('pinned PR path identity', () => {
   const renamedTo = process.platform === 'win32' ? ' to b/new.ex' : ' to b/new.ex ';
   // Windows cannot create filenames containing a tab, quote, or newline.
   const quoted = process.platform === 'win32' ? undefined : 'tab\tquote"line\n.ex';
+  // A real U+FFFD in a filename is valid UTF-8; only Git's own C-quoting lets it
+  // be told apart from a replacement left by lossy decoding.
+  const replacement = process.platform === 'win32' ? undefined : `caf${String.fromCharCode(0xe9)}-${String.fromCharCode(0xfffd)}.ex`;
   beforeAll(async () => {
     cwd = await mkdtemp(join(tmpdir(), 'rcl-pinned-paths-'));
     await git('init', '--template=', '-q');
@@ -37,6 +40,7 @@ describe('pinned PR path identity', () => {
     await write('a b/deleted.ex', 'deleted\n');
     await write(renamedFrom, 'unique renamed content\n');
     if (quoted !== undefined) await write(quoted, 'quoted old\n');
+    if (replacement !== undefined) await write(replacement, 'replacement old\n');
     await git('add', '.'); await git('commit', '-qm', 'base');
     baseSha = await git('rev-parse', 'HEAD');
     await write('a b/z', 'new\n');
@@ -45,6 +49,7 @@ describe('pinned PR path identity', () => {
     await rm(join(cwd, renamedFrom));
     await write(renamedTo, 'unique renamed content\n');
     if (quoted !== undefined) await write(quoted, 'quoted new\n');
+    if (replacement !== undefined) await write(replacement, 'replacement new\n');
     await git('add', '.'); await git('commit', '-qm', 'head');
     headSha = await git('rev-parse', 'HEAD');
   });
@@ -54,6 +59,7 @@ describe('pinned PR path identity', () => {
     const diff = await loadPinnedGitDiff({ cwd, owner: 'o', repo: 'r', baseSha, headSha });
     expect(diff.files.map(file => file.filename).sort()).toEqual([
       'a b/z', 'a b/added.ex', 'a b/deleted.ex', renamedTo, ...(quoted === undefined ? [] : [quoted]),
+      ...(replacement === undefined ? [] : [replacement]),
     ].sort());
     expect(diff.files.find(file => file.filename === 'a b/z')).toMatchObject({ status: 'modified',
       patch: '@@ -1 +1 @@\n-old\n+new\n' });

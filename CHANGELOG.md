@@ -24,6 +24,8 @@
   exact-head label grant supplies the same values.
   A non-ASCII path that also needs C-quoting is matched in the form Git prints under
   `core.quotepath=false`.
+  The pinned diff is read with Git's default path quoting, so a filename that really
+  contains U+FFFD is told apart from a replacement left by lossy decoding.
 
 ## 4.5.41 - 2026-11-10
 

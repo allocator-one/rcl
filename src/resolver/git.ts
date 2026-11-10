@@ -225,7 +225,9 @@ async function readPinnedPatch(
   try {
     // diff.relative and diff.ignoreSubmodules would silently drop files from a
     // "complete" patch, so the reader's own configuration must not decide.
-    rawDiff = await readGit(['-c', 'core.quotepath=false', '-c', 'diff.algorithm=myers',
+    // quotepath on makes Git C-quote every non-ASCII byte, so an unquoted path
+    // is ASCII and a raw U+FFFD can only be lossy decoding, never a filename.
+    rawDiff = await readGit(['-c', 'core.quotepath=true', '-c', 'diff.algorithm=myers',
       '-c', 'diff.indentHeuristic=true', '-c', 'diff.relative=false', 'diff', '--ignore-submodules=none', '--no-color', '--no-ext-diff', '--no-textconv',
       '--find-renames=50%', '--full-index', '--binary', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3',
       mergeBaseSha, headSha, '--'], maxBytes);
