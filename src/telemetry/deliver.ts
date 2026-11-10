@@ -5,7 +5,7 @@ import { HarnessSchema, type Config } from '../config/schema.js';
 import type { ReviewResult } from '../consensus/types.js';
 import { declaresStrictFallback, strictFallbackProblem } from '../consensus/strict-fallback.js';
 import { resolveDataDir } from '../config/data-dir.js';
-import { credentialHost, resolveHarnessCredential, type HarnessCredential } from './credentials.js';
+import { credentialHost, resolveHarnessCredential, type CredentialResolution, type HarnessCredential } from './credentials.js';
 import { declareReviewerRecovery, type ReviewerRecoverySource, buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type RunEnvelope, type TelemetryLevel } from './envelope.js';
 import { validateRunEnvelope, type EvidenceDiagnostic } from './envelope-validation.js';
 import { Quarantine, QUARANTINE_DIR, type RetentionOutcome } from './quarantine.js';
@@ -41,6 +41,8 @@ export interface TelemetryRuntime {
   repoManaged: boolean;
   parseFailures: boolean;
   credential?: HarnessCredential;
+  /** The credential file (null when none) and why it was chosen; never the token. */
+  credentialOrigin?: CredentialResolution['origin'];
   /**
    * The credential is the run-bound one of `--attest` (RCL-40): it does not
    * outlive the workflow run, so nothing recorded under it is spooled.
@@ -201,6 +203,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
   if (resolved.note !== undefined) runtime.note = resolved.note;
   if (resolved.credential) {
     runtime.credential = resolved.credential;
+    if (resolved.origin) runtime.credentialOrigin = resolved.origin;
     runtime.sink = new HarnessSink({
       credential: resolved.credential,
       rclVersion: options.rclVersion,

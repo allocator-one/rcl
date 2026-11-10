@@ -375,6 +375,19 @@ artifacts (`--resume-async-sha256`), and claims exactly the next checkpointed
 attempt under its explicitly bounded cap. It requires `--retry-reason`,
 `--evidence-required` and an explicit `--max-attempts`.
 
+If that checkpointed successor's host also dies, repeat its exact
+`--resume-pending` command with a fresh output path. It resumes the existing
+attempt and round, including at the attempt cap (for example, 2/2); it does not
+claim another attempt. Preview the same command with `--preview-pending` first:
+`resumedCheckpoint: true` and `runId` identify the reused checkpoint, and
+`nextAttempt` is the existing attempt rather than a new ordinal. The original
+package, head, inputs, plan, retained async artifacts and unchanged cap must
+still match. A live owner, missing journal or changed capture refuses before
+native state changes. The original deadline and physical-call limits remain
+in force. Completed calls are reused; if the terminal report was already
+retained, its exact bytes and reviewer artifact are delivered again without
+rerunning reviewers or verification.
+
 **Finalize only.** Use `--finalize-pending-only` when recovery must stop at
 that failed/unknown finalization. Like `--resume-pending`, it takes the
 retained async digests with `--resume-async-sha256` (`none` represents an

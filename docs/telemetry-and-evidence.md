@@ -138,6 +138,11 @@ rcl telemetry rejected --run <run id> --json  # inspect one retained original
 rcl review owner/repo#7 --no-telemetry   # keep this review on the machine
 ```
 
+`rcl telemetry status` also prints the credential file the login came from and
+why it was chosen (an org-scoped login, or the legacy `credentials.json` and
+why no org-scoped one applied); `--json` carries the same as `credential.file`
+and `credential.reason`. The token is never printed.
+
 `rcl telemetry rejected` inspects the quarantine files and verifies their
 digests without contacting Harness, flushing the outbox, changing native review
 accounting or applying recovery. Recovery of an already-completed historical
