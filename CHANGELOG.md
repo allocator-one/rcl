@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.36 - 2026-11-10
+
 - Resolve the temporary directories in `test/converge/fresh-review-close.test.ts`
   to their real paths (RCL-237). On macOS `os.tmpdir()` is a symlink
   (`/var/folders/…` to `/private/var/…`), so the fixtures tripped the review
