@@ -261,6 +261,19 @@ describe('runReviews worker pool', () => {
     }
   });
 
+  it('reviews OpenAI at high effort unless configured otherwise', () => {
+    const prev = process.env['OPENAI_API_KEY'];
+    process.env['OPENAI_API_KEY'] = 'oai-key';
+    try {
+      const effort = (adapter: ReviewAdapter) => (adapter as unknown as { reviewReasoningEffort?: string }).reviewReasoningEffort;
+      expect(effort(defaultAdapterFactory('openai'))).toBe('high');
+      expect(effort(defaultAdapterFactory('openai', 'low', 'medium'))).toBe('medium');
+    } finally {
+      if (prev === undefined) delete process.env['OPENAI_API_KEY'];
+      else process.env['OPENAI_API_KEY'] = prev;
+    }
+  });
+
   it('openrouter without OPENROUTER_API_KEY surfaces a per-review error', async () => {
     const prev = process.env['OPENROUTER_API_KEY'];
     delete process.env['OPENROUTER_API_KEY'];

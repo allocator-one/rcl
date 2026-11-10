@@ -38,6 +38,7 @@ export interface AsyncLaneOptions {
   timeoutMs: number;
   maxRetries: number;
   reasoningEffort?: ReasoningEffort;
+  openaiReasoningEffort?: ReasoningEffort;
 }
 
 interface SpoolPayload extends AsyncCallSpec {
@@ -46,6 +47,7 @@ interface SpoolPayload extends AsyncCallSpec {
   timeoutMs: number;
   maxRetries: number;
   reasoningEffort?: ReasoningEffort;
+  openaiReasoningEffort?: ReasoningEffort;
   launchedAt: string;
 }
 
@@ -187,6 +189,7 @@ export async function spoolAsyncCalls(
       timeoutMs: options.timeoutMs,
       maxRetries: options.maxRetries,
       ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+      ...(options.openaiReasoningEffort ? { openaiReasoningEffort: options.openaiReasoningEffort } : {}),
       launchedAt: new Date().toISOString(),
       ...call,
     };
@@ -272,7 +275,7 @@ export async function runAsyncWorker(
 ): Promise<void> {
   const payload = JSON.parse(await readFile(spoolFile, 'utf8')) as SpoolPayload;
   const factory =
-    adapterFactory ?? ((provider: string) => defaultAdapterFactory(provider, payload.reasoningEffort));
+    adapterFactory ?? ((provider: string) => defaultAdapterFactory(provider, payload.reasoningEffort, payload.openaiReasoningEffort));
 
   let review: ModelReview;
   try {

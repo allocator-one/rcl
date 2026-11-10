@@ -38,7 +38,7 @@ import { createGitHubClient, getGitHubPullRequest } from './resolver/github-clie
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
 import { loadPlanAsDiff } from './resolver/plan.js';
-import { isPlanFocus, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js';
+import { isPlanFocus, PLAN_DEFAULT_FOCUS, PLAN_FOCUS_CHOICES, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js';
 import { chunkDiff, DEFAULT_REVIEW_CAPACITY, MAX_REVIEW_CAPACITY, validateReviewCapacity, type ReviewCapacity } from './prepare/chunker.js';
 import { CAPTURED_INPUT_HARD_LIMITS, type CapturedInputCapacity } from './dispatch/captured-inputs.js';
 import { buildPrompt, loadContextDocs as loadPromptContextDocs } from './prepare/prompt-builder.js';
@@ -415,7 +415,7 @@ program
 program
   .command('review-plan <file>')
   .description('Council-review an implementation plan document before code exists')
-  .option('--focus <mode>', `Focus the review: ${PLAN_FOCUS_MODES.join(' | ')} (default: comprehensive)`)
+  .option('--focus <mode>', `Focus the review: ${PLAN_FOCUS_MODES.join(' | ')} (default: ${PLAN_DEFAULT_FOCUS})`)
   .option('--max-review-chunks <n>', 'Explicit full-patch capacity, up to 512 lossless chunks (default 32)')
   .option('--max-blocking-calls <n>', 'Explicit paid-work capacity, up to 8192 blocking calls (default 512)')
   .option('--role <name>', 'Use a single named role')
@@ -3090,6 +3090,7 @@ async function executeCouncil(
             timeoutMs: config.asyncTimeout ?? DEFAULT_ASYNC_TIMEOUT_MS,
             maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
             reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+            openaiReasoningEffort: config.openaiReasoningEffort,
           }
         );
         launchAsyncWorkers(spools);
@@ -3185,6 +3186,7 @@ async function executeCouncil(
         // legacy config digests. Explicit caps remain source-bound inputs.
         providerConcurrency,
         reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+        openaiReasoningEffort: config.openaiReasoningEffort,
         // Quorum closure (RCL-26, RCL-136): the round stops waiting once the
         // configured fraction of blocking seats completed every chunk — the
         // same seats and policy as the report's blocking health and the
@@ -3332,7 +3334,7 @@ async function executeCouncil(
       ...(prepared.spec ? { spec: prepared.spec } : {}),
       contextFiles: contextDocs.map((d) => ({ path: d.label, sha256: d.sha256 })),
       // Record the effective focus that shaped the plan prompts.
-      ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? 'comprehensive' } } : {}),
+      ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? PLAN_DEFAULT_FOCUS } } : {}),
       runner: detectRunner(process.env, hostname()),
       startedAt: extra.pendingResume
         ? new Date(extra.pendingResume.launch.startedAtMs)
@@ -3697,10 +3699,12 @@ async function runPlanReview(
     assertEvidenceCanBeRequired(opts);
 
     let focus: PlanFocus | undefined;
-    if (opts.focus) {
+    // The default is accepted by name but stays "no focus", so an explicit
+    // `--focus comprehensive` runs the same prompts as omitting the flag.
+    if (opts.focus && opts.focus !== PLAN_DEFAULT_FOCUS) {
       if (!isPlanFocus(opts.focus)) {
         spinner.fail(
-          `Invalid --focus "${opts.focus}". Use one of: ${PLAN_FOCUS_MODES.join(', ')}.`
+          `Invalid --focus "${opts.focus}". Use one of: ${PLAN_FOCUS_CHOICES.join(', ')}.`
         );
         process.exit(1);
       }

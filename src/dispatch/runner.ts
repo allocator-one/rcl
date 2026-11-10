@@ -7,7 +7,7 @@ import { AnthropicAdapter } from './anthropic.js';
 import { OpenAIAdapter } from './openai.js';
 import { GoogleAdapter } from './google.js';
 import { OpenAICompatAdapter } from './openai-compat.js';
-import { DEFAULT_REASONING_EFFORT } from '../config/defaults.js';
+import { DEFAULT_OPENAI_REASONING_EFFORT, DEFAULT_REASONING_EFFORT } from '../config/defaults.js';
 import { MODEL_PROVIDER_SET } from '../config/providers.js';
 import type { ReasoningEffort } from '../config/schema.js';
 import { hasSuccessfulQuorum, resolveQuorumPolicy } from './quorum.js';
@@ -74,6 +74,8 @@ export interface RunnerOptions {
   acceptReview?: (review: ModelReview, callIndex: number) => Promise<void>;
   /** Reasoning budget for providers that support it; defaults to 'medium'. */
   reasoningEffort?: ReasoningEffort;
+  /** OpenAI review-call effort; defaults to DEFAULT_OPENAI_REASONING_EFFORT. */
+  openaiReasoningEffort?: ReasoningEffort;
   /** Test seam / config-key wiring; defaults to the builtin providers. */
   adapterFactory?: (provider: string) => ReviewAdapter;
   /**
@@ -103,13 +105,14 @@ type AdapterCall = {
 
 export function defaultAdapterFactory(
   provider: string,
-  reasoningEffort: ReasoningEffort = DEFAULT_REASONING_EFFORT
+  reasoningEffort: ReasoningEffort = DEFAULT_REASONING_EFFORT,
+  openaiReasoningEffort: ReasoningEffort = DEFAULT_OPENAI_REASONING_EFFORT
 ): ReviewAdapter {
   switch (provider) {
     case 'anthropic':
       return new AnthropicAdapter();
     case 'openai':
-      return new OpenAIAdapter();
+      return new OpenAIAdapter(undefined, undefined, { reviewReasoningEffort: openaiReasoningEffort });
     case 'google':
       return new GoogleAdapter();
     case 'openrouter': {
@@ -170,7 +173,7 @@ export async function runReviews(
   };
   const factory =
     options.adapterFactory ??
-    ((provider: string) => defaultAdapterFactory(provider, options.reasoningEffort));
+    ((provider: string) => defaultAdapterFactory(provider, options.reasoningEffort, options.openaiReasoningEffort));
   // One adapter (and HTTP client) per provider per run; a throwing
   // constructor is handled per call below so one bad provider doesn't
   // take down the pool.

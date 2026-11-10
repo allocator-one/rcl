@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
+import type { ReasoningEffort } from '../config/schema.js';
 import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
 import {
   stripKnownProviderPrefix,
@@ -25,8 +26,11 @@ export class OpenAIAdapter implements ReviewAdapter {
   provider = 'openai';
 
   private client: OpenAI;
+  /** Omitted when unset, and for non-reasoning models, so their own default applies. */
+  private reviewReasoningEffort: ReasoningEffort | undefined;
 
-  constructor(apiKey?: string, baseUrl?: string) {
+  constructor(apiKey?: string, baseUrl?: string, opts?: { reviewReasoningEffort?: ReasoningEffort }) {
+    this.reviewReasoningEffort = opts?.reviewReasoningEffort;
     this.client = new OpenAI({
       apiKey: apiKey ?? process.env['OPENAI_API_KEY'],
       baseURL: baseUrl,
@@ -63,6 +67,8 @@ export class OpenAIAdapter implements ReviewAdapter {
               { role: 'user', content: userPrompt },
             ],
             response_format: { type: 'json_object' },
+            // Only reasoning models (the same gpt-5+/o-series family) accept the parameter.
+            ...(this.reviewReasoningEffort && usesCompletionTokens ? { reasoning_effort: this.reviewReasoningEffort } : {}),
             ...(usesCompletionTokens
               ? { max_completion_tokens: 16384 }
               : { max_tokens: 16384 }),

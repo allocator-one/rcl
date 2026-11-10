@@ -121,6 +121,8 @@ export const ConfigSchema = z.object({
   ).optional(),
   /** Reasoning budget for providers that support it (currently OpenRouter). */
   reasoningEffort: ReasoningEffortSchema.optional(),
+  /** OpenAI review-call effort; unset uses DEFAULT_OPENAI_REASONING_EFFORT. */
+  openaiReasoningEffort: ReasoningEffortSchema.optional(),
   githubToken: z.string().optional(),
   context: z.array(z.string()).optional(),
   spec: z.string().optional(),

@@ -262,6 +262,38 @@ describe('rcl review — files-only --context contract (RCL-190)', () => {
   });
 });
 
+describe('rcl review-plan — --focus default (RCL-55)', () => {
+  it('runs the default its own help advertises exactly as omitting the flag does', async () => {
+    const help = runRcl(['review-plan', '--help'], tempRepository()).stdout.replace(/\s+/g, ' ');
+    const advertised = /--focus <mode>.*\(default: (\w+)\)/.exec(help)?.[1];
+    expect(advertised).toBe('comprehensive');
+    const promptsFor = async (focusArgs: string[]) => {
+      let prompts: string[] = [];
+      await withGuardedFixture(async fixture => {
+        writeFileSync(join(fixture.repo, 'plan.md'), '# Plan\n\nShip it.\n');
+        const result = await runRclAsync(['review-plan', 'plan.md', ...focusArgs, '--config', 'config.json',
+          '--json-file', 'report.json', '--no-telemetry'], fixture.repo, fixture.env);
+        expect(result.status, result.stderr).toBe(0);
+        prompts = fixture.requestBodies().map(body => body.messages.map(message => message.content).join('\n')).sort();
+      });
+      return prompts;
+    };
+    const omitted = await promptsFor([]);
+    const explicit = await promptsFor(['--focus', advertised!]);
+    // The council really reviewed the plan both times, and the flag changed nothing sent to a reviewer.
+    expect(omitted.length).toBeGreaterThanOrEqual(1);
+    expect(explicit).toEqual(omitted);
+  }, 60_000);
+
+  it('still rejects an unknown focus and names the accepted values', () => {
+    const directory = tempRepository();
+    writeFileSync(join(directory, 'plan.md'), '# Plan\n');
+    const result = runRcl(['review-plan', 'plan.md', '--focus', 'vibes'], directory);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/Invalid --focus "vibes"\. Use one of: .*comprehensive/);
+  });
+});
+
 describe('rcl review — shared task context (RCL-191)', () => {
   it('gives every reviewer, not only spec-compliance, the specification', async () => {
     await withGuardedFixture(async fixture => {
