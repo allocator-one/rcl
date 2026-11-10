@@ -406,14 +406,36 @@ async function certifiedPatchlessFiles(
     const blocks = rawDiff.split(/^diff --git /m).slice(1);
     return new Set(candidates.filter(file => {
       const oldPath = file.previous_filename ?? file.filename;
-      const header = `a/${oldPath} b/${file.filename}\n`;
-      const matching = blocks.filter(block => block.startsWith(header));
-      return matching.length === 1 && certifiesNonTextChange(file, matching[0]!.slice(header.length));
+      const headers = gitPathForms(`a/${oldPath}`).flatMap(old => gitPathForms(`b/${file.filename}`).map(next => `${old} ${next}\n`));
+      const matching = blocks.flatMap(block => {
+        const header = headers.find(candidate => block.startsWith(candidate));
+        return header ? [block.slice(header.length)] : [];
+      });
+      return matching.length === 1 && certifiesNonTextChange(file, matching[0]!);
     }));
   } catch {
     // An unavailable or malformed raw comparison never licenses omission.
     return new Set();
   }
+}
+
+const GIT_PATH_ESCAPES = new Map([[7, '\\a'], [8, '\\b'], [9, '\\t'], [10, '\\n'], [11, '\\v'], [12, '\\f'], [13, '\\r'], [34, '\\"'], [92, '\\\\']]);
+
+/** Git C-quotes a path containing control characters, quotes, backslashes or (core.quotepath) non-ASCII bytes. */
+function quoteGitPath(path: string, quotePath: boolean): string {
+  const bytes = Buffer.from(path, 'utf8');
+  const needsQuote = (byte: number): boolean => byte < 0x20 || byte === 0x22 || byte === 0x5c || byte === 0x7f || (quotePath && byte >= 0x80);
+  if (!bytes.some(needsQuote)) return path;
+  let out = '"';
+  for (const byte of bytes) {
+    out += GIT_PATH_ESCAPES.get(byte) ?? (needsQuote(byte) ? `\\${byte.toString(8).padStart(3, '0')}` : String.fromCharCode(byte));
+  }
+  return `${out}"`;
+}
+
+/** Every spelling Git may print a path in, under either core.quotepath setting. */
+function gitPathForms(path: string): string[] {
+  return [...new Set([quoteGitPath(path, true), quoteGitPath(path, false)])];
 }
 
 function certifiesNonTextChange(file: ChangedFile, body: string): boolean {
@@ -429,17 +451,19 @@ function certifiesNonTextChange(file: ChangedFile, body: string): boolean {
   }
   if (lines.length === 0) return modeChange && file.status === 'modified';
   if (file.status === 'renamed' && file.previous_filename && lines.length === 3 &&
-      lines[0] === 'similarity index 100%' && lines[1] === `rename from ${file.previous_filename}` &&
-      lines[2] === `rename to ${file.filename}`) return true;
+      lines[0] === 'similarity index 100%' && gitPathForms(file.previous_filename).includes(lines[1]!.slice(12)) &&
+      lines[1]!.startsWith('rename from ') && lines[2]!.startsWith('rename to ') &&
+      gitPathForms(file.filename).includes(lines[2]!.slice(10))) return true;
 
   if (file.status === 'added' && /^new file mode [0-7]{6}$/.test(lines[0] ?? '')) lines.shift();
   if (file.status === 'removed' && /^deleted file mode [0-7]{6}$/.test(lines[0] ?? '')) lines.shift();
   if (file.status === 'renamed' && file.previous_filename && /^similarity index (?:[0-9]{1,2}|100)%$/.test(lines[0] ?? '') &&
-      lines[1] === `rename from ${file.previous_filename}` && lines[2] === `rename to ${file.filename}`) lines.splice(0, 3);
+      lines[1]?.startsWith('rename from ') && gitPathForms(file.previous_filename).includes(lines[1].slice(12)) &&
+      lines[2]?.startsWith('rename to ') && gitPathForms(file.filename).includes(lines[2].slice(10))) lines.splice(0, 3);
   if (lines.length !== 2) return false;
   const index = /^index ([a-f0-9]{7,40})\.\.([a-f0-9]{7,40})(?: [0-7]{6})?$/.exec(lines[0]!);
   if (!index || !file.sha.startsWith(index[file.status === 'removed' ? 1 : 2]!)) return false;
-  const oldPath = file.status === 'added' ? '/dev/null' : `a/${file.previous_filename ?? file.filename}`;
-  const newPath = file.status === 'removed' ? '/dev/null' : `b/${file.filename}`;
-  return lines[1] === `Binary files ${oldPath} and ${newPath} differ`;
+  const oldPaths = file.status === 'added' ? ['/dev/null'] : gitPathForms(`a/${file.previous_filename ?? file.filename}`);
+  const newPaths = file.status === 'removed' ? ['/dev/null'] : gitPathForms(`b/${file.filename}`);
+  return oldPaths.some(old => newPaths.some(next => lines[1] === `Binary files ${old} and ${next} differ`));
 }

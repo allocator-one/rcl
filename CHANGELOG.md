@@ -18,7 +18,10 @@
   UTF-8 bytes, is accepted; only a raw replacement character is refused. The pinned diff also ignores a
   repository-local `diff.ignoreSubmodules`, so submodule changes stay in the patch.
   A local Git timeout or output-limit failure while checking ancestry keeps its own
-  refusal instead of selecting hosted acquisition.
+  refusal instead of selecting hosted acquisition. A patchless binary, mode-only or
+  pure-rename change is certified under either Git path quoting, and an attested PR
+  review refuses `--max-review-chunks` and `--max-blocking-calls` unless the
+  exact-head label grant supplies the same values.
 
 ## 4.5.41 - 2026-11-10
 

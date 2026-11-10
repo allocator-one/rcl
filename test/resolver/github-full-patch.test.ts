@@ -136,6 +136,27 @@ describe('authoritative PR patch acquisition', () => {
   });
 
   it.each([
+    { name: 'a non-ASCII binary change', filename: 'caf\u00e9.png', status: 'modified',
+      raw: 'diff --git "a/caf\\303\\251.png" "b/caf\\303\\251.png"\nindex eeeeeee..ddddddd 100644\nBinary files "a/caf\\303\\251.png" and "b/caf\\303\\251.png" differ\n' },
+    { name: 'a tab in a mode-only change', filename: 'a\tb.sh', status: 'modified',
+      raw: 'diff --git "a/a\\tb.sh" "b/a\\tb.sh"\nold mode 100644\nnew mode 100755\n' },
+    { name: 'a pure rename to a quoted name', filename: 'caf\u00e9.ex', previous_filename: 'cafe.ex', status: 'renamed',
+      raw: 'diff --git a/cafe.ex "b/caf\\303\\251.ex"\nsimilarity index 100%\nrename from cafe.ex\nrename to "caf\\303\\251.ex"\n' },
+    { name: 'a name with a quote and a backslash', filename: 'we"ird\\.png', status: 'modified',
+      raw: 'diff --git "a/we\\"ird\\\\.png" "b/we\\"ird\\\\.png"\nindex eeeeeee..ddddddd 100644\nBinary files "a/we\\"ird\\\\.png" and "b/we\\"ird\\\\.png" differ\n' },
+    { name: 'a non-ASCII name Git left unquoted (core.quotepath=false)', filename: 'caf\u00e9.png', status: 'modified',
+      raw: 'diff --git a/caf\u00e9.png b/caf\u00e9.png\nindex eeeeeee..ddddddd 100644\nBinary files a/caf\u00e9.png and b/caf\u00e9.png differ\n' },
+  ])('certifies a patchless change whose Git header quotes the path: $name', async ({ raw, name: _name, ...file }) => {
+    const sha = 'd'.repeat(40);
+    const f = fixture([{ ...file, additions: 0, deletions: 0, sha }], raw);
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('missing objects'));
+    const diff = await fetchPRDiff(target, undefined, f.client);
+    expect(diff.files[0]).toMatchObject({ filename: file.filename, additions: 0, deletions: 0, patch: '', blobSha: sha });
+    expect(loadPinnedGitDiff).not.toHaveBeenCalled();
+    expect(loadHostedPinnedGitDiff).not.toHaveBeenCalled();
+  });
+
+  it.each([
     'diff --git a/other.png b/other.png\nindex eeeeeee..ddddddd 100644\nBinary files a/other.png and b/other.png differ\n',
     'diff --git a/logo.png b/logo.png\nindex eeeeeee..ffffff0 100644\nBinary files a/logo.png and b/logo.png differ\n',
     'diff --git a/logo.png b/logo.png\nold mode 100644\nnew mode 100755\n@@ -1 +1 @@\n-old\n+new\n',

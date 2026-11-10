@@ -33,7 +33,7 @@ import {
 } from './config/defaults.js';
 import { resolveProviderConcurrency } from './config/provider-concurrency.js';
 import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from './resolver/github.js';
-import { resolvePRCapacity, type PRCapacityAuthorization } from './resolver/pr-capacity-authority.js';
+import { assertAttestedCapacityGrant, resolvePRCapacity, type PRCapacityAuthorization } from './resolver/pr-capacity-authority.js';
 import { createGitHubClient, getGitHubPullRequest } from './resolver/github-client.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
@@ -2376,11 +2376,9 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     let prCapacity: PRCapacityAuthorization | undefined;
     if (prTarget) {
       prCapacity = await resolvePRCapacity(prTarget, config.githubToken);
+      // Without a grant, an attested review may not raise capacity by flag.
+      if (opts.attest || prCapacity) assertAttestedCapacityGrant(opts, prCapacity);
       if (prCapacity) {
-        if ((opts.maxReviewChunks !== undefined && opts.maxReviewChunks !== String(prCapacity.maxReviewChunks)) ||
-            (opts.maxBlockingCalls !== undefined && opts.maxBlockingCalls !== String(prCapacity.maxBlockingCalls))) {
-          throw new Error('CLI review capacity conflicts with the authorized exact-head PR capacity label.');
-        }
         opts = {
           ...opts,
           maxReviewChunks: String(prCapacity.maxReviewChunks),

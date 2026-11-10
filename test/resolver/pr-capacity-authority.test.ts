@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Octokit } from '@octokit/rest';
-import { resolvePRCapacity } from '../../src/resolver/pr-capacity-authority.js';
+import { assertAttestedCapacityGrant, resolvePRCapacity } from '../../src/resolver/pr-capacity-authority.js';
 
 const target = { owner: 'owner', repo: 'repo', number: 7 };
 const headSha = 'a'.repeat(40);
@@ -314,5 +314,26 @@ describe('resolvePRCapacity', () => {
     expect(error.message).toMatch(/capacity/i);
     expect(error.message).not.toContain('secret-fixture-token');
     expect(error.cause).toBeUndefined();
+  });
+});
+
+describe('assertAttestedCapacityGrant', () => {
+  const grant = { maxReviewChunks: 128, maxBlockingCalls: 2048 } as Parameters<typeof assertAttestedCapacityGrant>[1];
+
+  it.each([
+    { maxReviewChunks: '64' },
+    { maxBlockingCalls: '200' },
+  ])('refuses an explicit capacity flag in an attested review that holds no grant: %j', (flags) => {
+    expect(() => assertAttestedCapacityGrant(flags, undefined)).toThrow(/authorized exact-head PR capacity/);
+  });
+
+  it('allows an attested review without capacity flags or with the granted values', () => {
+    expect(() => assertAttestedCapacityGrant({}, undefined)).not.toThrow();
+    expect(() => assertAttestedCapacityGrant({ maxReviewChunks: '128', maxBlockingCalls: '2048' }, grant)).not.toThrow();
+  });
+
+  it('refuses a flag that differs from the grant', () => {
+    expect(() => assertAttestedCapacityGrant({ maxReviewChunks: '129' }, grant)).toThrow(/conflicts/);
+    expect(() => assertAttestedCapacityGrant({ maxBlockingCalls: '1' }, grant)).toThrow(/conflicts/);
   });
 });

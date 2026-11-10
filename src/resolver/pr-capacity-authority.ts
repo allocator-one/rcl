@@ -179,3 +179,23 @@ export async function resolvePRCapacity(
     throw new CapacityRefused('GitHub metadata or permission could not be verified.');
   }
 }
+
+/**
+ * Hosted attested reviews take capacity only from an authorized exact-head
+ * label grant; a CLI flag may repeat the grant but never replace or raise it.
+ */
+export function assertAttestedCapacityGrant(
+  flags: { maxReviewChunks?: string | undefined; maxBlockingCalls?: string | undefined },
+  grant: PRCapacityAuthorization | undefined,
+): void {
+  if (!grant) {
+    if (flags.maxReviewChunks !== undefined || flags.maxBlockingCalls !== undefined) {
+      throw new Error('An attested PR review takes capacity only from an authorized exact-head PR capacity label grant; remove --max-review-chunks and --max-blocking-calls.');
+    }
+    return;
+  }
+  if ((flags.maxReviewChunks !== undefined && flags.maxReviewChunks !== String(grant.maxReviewChunks)) ||
+      (flags.maxBlockingCalls !== undefined && flags.maxBlockingCalls !== String(grant.maxBlockingCalls))) {
+    throw new Error('CLI review capacity conflicts with the authorized exact-head PR capacity label.');
+  }
+}
