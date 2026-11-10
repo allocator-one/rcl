@@ -26,6 +26,8 @@
   `core.quotepath=false`.
   The pinned diff is read with Git's default path quoting, so a filename that really
   contains U+FFFD is told apart from a replacement left by lossy decoding.
+  A pinned patch whose bytes are not valid UTF-8 is refused instead of having those
+  bytes replaced, locally and from hosted acquisition.
 
 ## 4.5.41 - 2026-11-10
 

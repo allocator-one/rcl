@@ -30,13 +30,13 @@ index ${'1'.repeat(40)}..${'2'.repeat(40)} 100644
 +new
 `;
 const input = () => ({ owner: 'o', repo: 'r', baseSha, headSha, expectedMergeBaseSha, token });
-let failFetch = false, wrongCommit = false, pauseFetch = false, largeSnapshot = false;
+let failFetch = false, wrongCommit = false, pauseFetch = false, largeSnapshot = false, invalidUtf8 = false;
 let unsupportedFilterCommand: 'fetch' | 'diff' | undefined;
 let pauseDiff = false;
 
 beforeEach(() => {
   mocks.oversizedStorage = false;
-  failFetch = false; wrongCommit = false; pauseFetch = false; largeSnapshot = false;
+  failFetch = false; wrongCommit = false; pauseFetch = false; largeSnapshot = false; invalidUtf8 = false;
   unsupportedFilterCommand = undefined; pauseDiff = false;
   mocks.spawn.mockReset().mockImplementation((_command, args: string[]) => {
     const child = Object.assign(new EventEmitter(), {
@@ -62,7 +62,7 @@ beforeEach(() => {
       }
       if (args.includes('config')) child.stdout.write(`${origin}\n`);
       if (args.includes('rev-parse')) child.stdout.write(`${wrongCommit ? baseSha : args.at(-1)!.split('^')[0]}\n`);
-      if (args.includes('diff')) child.stdout.write(rawDiff);
+      if (args.includes('diff')) child.stdout.write(invalidUtf8 ? Buffer.concat([Buffer.from(rawDiff), Buffer.from([0xe9, 0x0a])]) : rawDiff);
       child.emit('close', 0);
     });
     return child;
@@ -85,6 +85,12 @@ describe('hosted pinned PR object acquisition', () => {
       '--no-write-fetch-head', '--no-auto-maintenance', 'origin', headSha, expectedMergeBaseSha]));
     expect(mocks.spawn.mock.calls.flatMap(([, args]) => args)).not.toContain('checkout');
     expect(mocks.spawn.mock.calls.flatMap(([, args]) => args)).not.toContain('merge-base');
+    await expectRemoved();
+  });
+
+  it('refuses a patch whose changed bytes are not valid UTF-8 instead of replacing them', async () => {
+    invalidUtf8 = true;
+    await expect(loadHostedPinnedGitDiff(input())).rejects.toThrow('not valid UTF-8');
     await expectRemoved();
   });
 

@@ -119,12 +119,21 @@ export interface PinnedGitDiffOptions {
 /** Only unavailable local objects permit a hosted acquisition retry. */
 export class PinnedGitObjectsUnavailableError extends Error {}
 
+/** A pinned patch whose bytes cannot be decoded without replacement is not a lossless review input. */
+class PinnedPatchEncodingError extends Error {}
+
+function decodeGitText(bytes: Uint8Array): string {
+  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch { throw new PinnedPatchEncodingError('A complete PR patch contains bytes that are not valid UTF-8 and cannot be reviewed losslessly.'); }
+}
+
 /**
  * A timeout, output limit or missing git binary is an operational failure, not
  * proof that objects or the origin are absent, and must not select hosted
  * acquisition. A Git exit status (numeric code) is a real answer and does not.
  */
 function rethrowOperationalGitFailure(error: unknown): void {
+  if (error instanceof PinnedPatchEncodingError) throw error;
   const failure = error as { killed?: unknown; signal?: unknown; code?: unknown };
   if (failure.killed === true || typeof failure.signal === 'string' || typeof failure.code === 'string') throw error;
 }
@@ -171,13 +180,14 @@ export async function loadPinnedGitDiff(options: PinnedGitDiffOptions): Promise<
   const readGit = async (args: string[], bound = 16_384): Promise<string> => {
     try {
       const { stdout } = await execFileAsync('git', ['--no-replace-objects', ...args], {
-        cwd, env, maxBuffer: bound, encoding: 'utf8', timeout: 60_000,
+        cwd, env, maxBuffer: bound, encoding: 'buffer', timeout: 60_000,
       });
-      return stdout;
+      return decodeGitText(stdout);
     } catch (error) {
       const failure = error as { code?: unknown; stderr?: unknown };
-      const missing = typeof failure.stderr === 'string'
-        ? /^fatal: unable to read ([a-f0-9]+)\r?$/m.exec(failure.stderr) : null;
+      const stderr = Buffer.isBuffer(failure.stderr) ? failure.stderr.toString('utf8') : failure.stderr;
+      const missing = typeof stderr === 'string'
+        ? /^fatal: unable to read ([a-f0-9]+)\r?$/m.exec(stderr) : null;
       // Only an explicit missing object may select hosted acquisition. Output
       // limits and malformed patches must keep their original refusal.
       if (failure.code === 128 && missing && FULL_OBJECT_ID.test(missing[1]!)) {
@@ -232,7 +242,7 @@ async function readPinnedPatch(
       '--find-renames=50%', '--full-index', '--binary', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3',
       mergeBaseSha, headSha, '--'], maxBytes);
   } catch (error) {
-    if (error instanceof PinnedGitObjectsUnavailableError) throw error;
+    if (error instanceof PinnedGitObjectsUnavailableError || error instanceof PinnedPatchEncodingError) throw error;
     throw new Error(`Pinned PR diff could not be read within its ${maxBytes}-byte output bound.`);
   }
   if (/^GIT binary patch$/m.test(rawDiff) || /^Binary files .+ differ$/m.test(rawDiff)) {
@@ -386,7 +396,9 @@ async function runHostedGit(
         // Also check quick commands which completed between monitor ticks.
         if (await repositoryBytes(cwd) > HOSTED_GIT_STORAGE_BYTES) failure ??= 'Hosted PR acquisition exceeded its object storage bound.';
         if (failure || code !== 0) reject(new Error(failure ?? 'Hosted PR Git acquisition failed.'));
-        else resolve(Buffer.concat(chunks).toString('utf8'));
+        else {
+          try { resolve(decodeGitText(Buffer.concat(chunks))); } catch (error) { reject(error); }
+        }
       })().catch(() => reject(new Error('Hosted PR acquisition could not verify its object storage bound.')));
     });
   });

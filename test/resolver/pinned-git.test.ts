@@ -71,7 +71,7 @@ describe('pinned PR path identity', () => {
 });
 
 describe('pinned PR Git patches', () => {
-  let cwd: string, baseSha: string, headSha: string, largeSha: string, binarySha: string;
+  let cwd: string, baseSha: string, headSha: string, largeSha: string, binarySha: string, latin1Sha: string;
   const git = async (...args: string[]) => (await exec('git', args, { cwd, env })).stdout.trim();
   beforeAll(async () => {
     cwd = await mkdtemp(join(tmpdir(), 'rcl-pinned-pr-'));
@@ -91,10 +91,19 @@ describe('pinned PR Git patches', () => {
     await writeFile(join(cwd, 'binary.dat'), Buffer.from([0, 1, 2, 3]));
     await git('add', '.'); await git('commit', '-qm', 'binary');
     binarySha = await git('rev-parse', 'HEAD');
+    // Git treats this as text (no NUL) although the byte is not valid UTF-8.
+    await writeFile(join(cwd, 'latin1.ex'), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
+    await git('add', '.'); await git('commit', '-qm', 'latin1');
+    latin1Sha = await git('rev-parse', 'HEAD');
     await writeFile(join(cwd, 'a.ex'), 'uncommitted and excluded\n');
   });
   afterAll(async () => { await rm(cwd, { recursive: true, force: true }); });
   const input = () => ({ cwd, owner: 'o', repo: 'r', baseSha, headSha });
+
+  it('refuses a patch whose changed bytes are not valid UTF-8 instead of replacing them', async () => {
+    await expect(loadPinnedGitDiff({ ...input(), baseSha: binarySha, headSha: latin1Sha }))
+      .rejects.toThrow('not valid UTF-8');
+  });
 
   it('reviews the immutable PR commits without reading working-tree edits', async () => {
     const diff = await loadPinnedGitDiff(input());
