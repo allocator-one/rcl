@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 4.5.39 - 2026-11-10
+
+- Accept a group-writable recovery-lock ancestor when its group is the owner's
+  own user-private group (RCL-204). Ubuntu's umask 002 leaves the home
+  directory, checkout and `.git` at 775, and `rcl converge-stale --apply` refused
+  them with `unsafe_recovery_lock_ancestor`. The claim is deliberately narrow:
+  local files, the listed userdb locations and no ACL. The group counts as
+  private only when it is the owner's primary group, `/etc/group` lists no other
+  member, no other user has it as primary group, and `/etc/passwd` repeats
+  neither a username nor the owner's uid. Ids compare as numbers (`01000` is
+  `1000`), and a row with an id that is not plain decimal is refused.
+  A password hash in `/etc/group` refuses the exemption; a password kept in
+  `/etc/gshadow` cannot be read without root and is outside the claim.
+  `/etc/nsswitch.conf` must list `files`
+  for `passwd` and `group` and name no other source than `files` or `systemd`
+  for `passwd`, `group` and `initgroups`. `systemd` counts as local only while
+  none of `/etc/userdb`, `/run/userdb`, `/run/host/userdb`, `/usr/lib/userdb`
+  and `/usr/local/lib/userdb` holds a record and no systemd-homed socket exists
+  under `/run/systemd/userdb`. A userdb service registered elsewhere, or one
+  started after the check, is outside the claim. A `passwd`, `group` or
+  `initgroups` line that is repeated or spelled with a space before the colon
+  fails closed. The directory must also have
+  no POSIX ACL. An unreadable account database, a shared group, an LDAP, SSSD
+  or NIS source, an ACL, world-write, a root-owned group-writable directory
+  (also for a root caller) and the 0700 lock root are refused as before. The
+  error now names the offending path, its owner and mode, and the fix.
+
 - Name the problem when `rcl evidence retriage-finding --reason-file` points at a
   directory (RCL-217). An empty path, which is what an unset variable becomes in
   a launcher run under `env -i`, resolves to the working directory, and a
