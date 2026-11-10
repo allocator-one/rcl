@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile } from 'node:fs/promises';
 import * as filesystem from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { platformPath } from '../../telemetry/recovery/files.js';
@@ -27,29 +27,42 @@ type AccountReader = (path: string) => Promise<string>;
 const accountRows = async (read: AccountReader, path: string): Promise<string[][]> =>
   (await read(path)).split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(':'));
 
-// Only the local files (and nss-systemd's dynamic users) may answer passwd and group lookups.
-// Any other source (sss, ldap, nis, compat, winbind…) can add members these files do not list.
+// Only the local files may answer passwd, group and initgroups lookups. Any other source
+// (sss, ldap, nis, compat, winbind…) can add members these files do not list. nss-systemd
+// adds users and group memberships from userdb records, so it counts as local only while no
+// userdb directory holds a record.
 const localAccountSources = new Set(['files', 'systemd']);
-async function usesOnlyLocalAccountFiles(read: AccountReader): Promise<boolean> {
+const userdbDirectories = ['/etc/userdb', '/run/userdb', '/run/host/userdb', '/usr/lib/userdb'];
+type DirectoryLister = (path: string) => Promise<string[]>;
+async function usesOnlyLocalAccounts(read: AccountReader, list: DirectoryLister): Promise<boolean> {
   const lines = (await read('/etc/nsswitch.conf')).split('\n').map(line => line.replace(/#.*/, '').trim());
-  return ['passwd', 'group'].every(database => {
+  const sourcesOf = (database: string): string[] | undefined => {
     const line = lines.find(candidate => candidate.startsWith(`${database}:`));
-    const sources = line?.slice(database.length + 1).replace(/\[[^\]]*\]/g, ' ').split(/\s+/).filter(Boolean) ?? [];
-    return sources.length > 0 && sources.every(source => localAccountSources.has(source));
-  });
+    return line?.slice(database.length + 1).replace(/\[[^\]]*\]/g, ' ').split(/\s+/).filter(Boolean);
+  };
+  // glibc falls back to the group database when there is no initgroups line.
+  const databases = [sourcesOf('passwd'), sourcesOf('group'), sourcesOf('initgroups') ?? []];
+  if (databases.slice(0, 2).some(sources => !sources?.length) || databases.some(sources => sources!.some(source => !localAccountSources.has(source)))) return false;
+  if (!databases.some(sources => sources!.includes('systemd'))) return true;
+  for (const directory of userdbDirectories) {
+    try { if ((await list(directory)).length > 0) return false; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false; }
+  }
+  return true;
 }
 
 /**
  * True when `gid` is the primary group of `uid` and nobody else is in it, as
- * with Debian/Ubuntu user-private groups. Reads only /etc/passwd, /etc/group and
- * /etc/nsswitch.conf; answers false when any is unreadable, when the lookup
- * order names a source other than local files, when the owner is not shown and
- * for root or group 0.
+ * with Debian/Ubuntu user-private groups. Reads only /etc/passwd, /etc/group,
+ * /etc/nsswitch.conf and the systemd userdb directories; answers false when any
+ * is unreadable, when the lookup order names a source other than local files,
+ * when a userdb record exists, when the owner is not shown and for root or group 0.
  */
-export async function isUserPrivateGroup(uid: number, gid: number, read: AccountReader = path => readFile(path, 'utf8')): Promise<boolean> {
+export async function isUserPrivateGroup(uid: number, gid: number, read: AccountReader = path => readFile(path, 'utf8'),
+  list: DirectoryLister = path => readdir(path)): Promise<boolean> {
   if (uid === 0 || gid === 0) return false;
   try {
-    if (!await usesOnlyLocalAccountFiles(read)) return false;
+    if (!await usesOnlyLocalAccounts(read, list)) return false;
     const passwd = await accountRows(read, '/etc/passwd'); const groups = await accountRows(read, '/etc/group');
     const owner = passwd.find(row => row[2] === String(uid));
     const matching = groups.filter(row => row[2] === String(gid));

@@ -81,6 +81,11 @@ const files = (passwd: string, group: string, nsswitch: string | null = filesOnl
   if (path === '/etc/passwd') return passwd; if (path === '/etc/group') return group;
   if (path === '/etc/nsswitch.conf' && nsswitch !== null) return nsswitch; throw new Error('ENOENT');
 };
+const missing = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+const userdb = (entries: Record<string, string[]> = {}) => async (path: string) => {
+  const found = entries[path]; if (found === undefined) throw missing; return found;
+};
+const noUserdb = userdb();
 it.each([
   { name: 'a user-private group without members', passwd: 'ann:x:1000:1000::/home/ann:/bin/sh', group: 'ann:x:1000:', safe: true },
   { name: 'a group listing only the owner', passwd: 'ann:x:1000:1000::/home/ann:/bin/sh', group: 'ann:x:1000:ann', safe: true },
@@ -90,12 +95,12 @@ it.each([
   { name: 'a group missing from /etc/group', passwd: 'ann:x:1000:1000::/h:/bin/sh', group: '', safe: false },
   { name: 'an owner missing from /etc/passwd', passwd: 'bob:x:1001:1001::/h:/bin/sh', group: 'ann:x:1000:', safe: false },
 ])('classifies $name', async item => {
-  await expect(isUserPrivateGroup(1000, 1000, files(item.passwd, item.group))).resolves.toBe(item.safe);
+  await expect(isUserPrivateGroup(1000, 1000, files(item.passwd, item.group), noUserdb)).resolves.toBe(item.safe);
 });
 
 it('never treats the root account or group 0 as a user-private group', async () => {
-  await expect(isUserPrivateGroup(0, 0, files('root:x:0:0:root:/root:/bin/bash', 'root:x:0:'))).resolves.toBe(false);
-  await expect(isUserPrivateGroup(1000, 0, files('ann:x:1000:0::/h:/bin/sh', 'root:x:0:'))).resolves.toBe(false);
+  await expect(isUserPrivateGroup(0, 0, files('root:x:0:0:root:/root:/bin/bash', 'root:x:0:'), noUserdb)).resolves.toBe(false);
+  await expect(isUserPrivateGroup(1000, 0, files('ann:x:1000:0::/h:/bin/sh', 'root:x:0:'), noUserdb)).resolves.toBe(false);
 });
 
 it.each([
@@ -104,11 +109,30 @@ it.each([
   { name: 'an SSSD passwd source', nsswitch: 'passwd: files sss\ngroup: files systemd\n', safe: false },
   { name: 'an LDAP group source', nsswitch: 'passwd: files\ngroup: files ldap\n', safe: false },
   { name: 'a compat NIS source', nsswitch: 'passwd: compat\ngroup: compat\n', safe: false },
+  { name: 'a separate initgroups source', nsswitch: 'passwd: files\ngroup: files\ninitgroups: files sss\n', safe: false },
+  { name: 'a local-only initgroups line', nsswitch: 'passwd: files\ngroup: files\ninitgroups: files\n', safe: true },
   { name: 'no group line', nsswitch: 'passwd: files\n', safe: false },
   { name: 'no passwd line', nsswitch: 'group: files\n', safe: false },
   { name: 'an unreadable nsswitch.conf', nsswitch: null, safe: false },
 ])('requires local-file account sources: $name', async item => {
-  await expect(isUserPrivateGroup(1000, 1000, files('ann:x:1000:1000::/h:/bin/sh', 'ann:x:1000:', item.nsswitch))).resolves.toBe(item.safe);
+  await expect(isUserPrivateGroup(1000, 1000, files('ann:x:1000:1000::/h:/bin/sh', 'ann:x:1000:', item.nsswitch), noUserdb)).resolves.toBe(item.safe);
+});
+
+const systemdAccounts = 'passwd: files systemd\ngroup: files systemd\n';
+it.each([
+  { name: 'nss-systemd with no userdb records', nsswitch: systemdAccounts, dirs: {}, safe: true },
+  { name: 'nss-systemd with empty userdb directories', nsswitch: systemdAccounts, dirs: { '/etc/userdb': [], '/run/userdb': [] }, safe: true },
+  { name: 'nss-systemd with a userdb membership drop-in', nsswitch: systemdAccounts, dirs: { '/etc/userdb': ['ann.membership'] }, safe: false },
+  { name: 'nss-systemd with a runtime userdb record', nsswitch: systemdAccounts, dirs: { '/run/userdb': ['bob.user'] }, safe: false },
+  { name: 'nss-systemd with a vendor userdb record', nsswitch: systemdAccounts, dirs: { '/usr/lib/userdb': ['bob.user'] }, safe: false },
+  { name: 'files only, where userdb records are never consulted', nsswitch: 'passwd: files\ngroup: files\n', dirs: { '/etc/userdb': ['bob.user'] }, safe: true },
+])('checks systemd userdb records only when nss-systemd answers lookups: $name', async item => {
+  await expect(isUserPrivateGroup(1000, 1000, files('ann:x:1000:1000::/h:/bin/sh', 'ann:x:1000:', item.nsswitch), userdb(item.dirs))).resolves.toBe(item.safe);
+});
+
+it('fails closed when a userdb directory cannot be listed', async () => {
+  const denied = async () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); };
+  await expect(isUserPrivateGroup(1000, 1000, files('ann:x:1000:1000::/h:/bin/sh', 'ann:x:1000:', systemdAccounts), denied)).resolves.toBe(false);
 });
 
 it.each([
@@ -123,8 +147,8 @@ it.each([
 });
 
 it('fails closed when the account databases are unreadable', async () => {
-  await expect(isUserPrivateGroup(1000, 1000, files('', ''))).resolves.toBe(false);
-  await expect(isUserPrivateGroup(1000, 1000, async () => { throw new Error('EACCES'); })).resolves.toBe(false);
+  await expect(isUserPrivateGroup(1000, 1000, files('', ''), noUserdb)).resolves.toBe(false);
+  await expect(isUserPrivateGroup(1000, 1000, async () => { throw new Error('EACCES'); }, noUserdb)).resolves.toBe(false);
 });
 
 it.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('works under a group-writable ancestor owned by this user when the group is private', async () => {
