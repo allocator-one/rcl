@@ -92,6 +92,11 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
         .rejects.toThrow('converge_target_form_unsupported');
     });
 
+  it('reports a free-form key containing a # as not launched before its first launch instead of refusing it', async () => {
+    expect(await inspectRoundLiveness({ gitCommonDir: await commonDir(), target: 'release#7', headSha }))
+      .toMatchObject({ target: 'release#7', status: 'not_launched', action: 'launch' });
+  });
+
   it('still reads a recorded key that merely looks like an unsupported form', async () => {
     const dir = await commonDir();
     await completedRound(dir, '17256');
@@ -124,5 +129,5 @@ describe('converge-status resolves a pull request by every accepted form (RCL-23
     expect(JSON.parse(bySlug.stdout)).toMatchObject({ target: slug, status: 'completed' });
     expect(refused.status).toBe(3);
     expect(refused.stderr).toContain('converge_target_form_unsupported');
-  });
+  }, 60_000); // three tsx CLI processes
 });

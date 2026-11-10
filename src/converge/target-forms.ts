@@ -19,9 +19,13 @@ export class UnsupportedConvergeTargetForm extends Error {
   }
 }
 
-/** A value shaped like a pull request reference that no accepted form covers: `#17256`, `17256`, an issue URL. */
+/**
+ * A value shaped like a pull request reference that no accepted form covers: `#17256`, `17256`, an issue URL, a
+ * malformed `owner/repo#…`. A free-form key that merely contains a `#` (`release#7`) names no reference and stays
+ * launchable.
+ */
 function looksLikeUnsupportedReference(target: string): boolean {
-  return /^#?\d+$/.test(target) || /^[a-z][a-z0-9+.-]*:\/\//i.test(target) || target.includes('#');
+  return /^#?\d+$/.test(target) || /^[a-z][a-z0-9+.-]*:\/\//i.test(target) || /^#/.test(target) || /^[^/#\s]+\/[^/#\s]+#/.test(target);
 }
 
 /**
