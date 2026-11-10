@@ -92,7 +92,7 @@ jobs:
           # List into a variable first: grep -q stops reading at the first match, and under
           # pipefail tar's SIGPIPE would then fail this check for a valid tarball.
           listing=$(tar -tf "${packages[0]}")
-          if ! grep -qx 'package/npm-shrinkwrap.json' <<< "$listing"; then
+          if ! grep -Fqx 'package/npm-shrinkwrap.json' <<< "$listing"; then
             echo "packed package has no npm-shrinkwrap.json — refusing to publish"
             exit 1
           fi
