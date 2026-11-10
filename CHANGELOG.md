@@ -12,6 +12,9 @@
   when the answer came from another key than the one passed. A reference that
   names no key (`#N`, a bare number, an issue URL) is refused with
   `converge_target_form_unsupported` instead of reading as not launched.
+
+## 4.5.34 - 2026-11-10
+
 - Leave generated paths out of the reviewed patch of a PR (RCL-209). A release
   that refreshes a bundled, served artifact (harness-cli#93 changed a 4.2 MB
   OpenAPI spec and its generated help) could not be reviewed: the patch was
