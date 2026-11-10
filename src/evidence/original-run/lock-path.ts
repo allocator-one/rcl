@@ -66,7 +66,9 @@ async function usesOnlyLocalAccounts(read: AccountReader, list: DirectoryLister)
  * listed for passwd and group or another source answers a lookup, when a userdb
  * record or a systemd-homed socket exists, when a username or the owner's uid
  * appears twice in /etc/passwd, when an id is not plain decimal (ids compare as
- * numbers, so 01000 is 1000), when the owner is not shown and for root or group 0.
+ * numbers, so 01000 is 1000), when /etc/group holds a group password hash, when the
+ * owner is not shown and for root or group 0. A password kept in /etc/gshadow is not readable
+ * without root and stays outside the claim.
  */
 export async function isUserPrivateGroup(uid: number, gid: number, read: AccountReader = path => readFile(path, 'utf8'),
   list: DirectoryLister = path => readdir(path)): Promise<boolean> {
@@ -79,7 +81,10 @@ export async function isUserPrivateGroup(uid: number, gid: number, read: Account
     if (passwd.some(row => Number.isNaN(id(row[2])) || Number.isNaN(id(row[3]))) || groups.some(row => Number.isNaN(id(row[2])))) return false;
     const owner = passwd.find(row => id(row[2]) === uid);
     if (new Set(passwd.map(row => row[0])).size !== passwd.length || passwd.filter(row => id(row[2]) === uid).length > 1) return false;
+    // A password hash in /etc/group lets anyone who knows it join through newgrp; `x` defers to gshadow, which a
+    // non-root process cannot read, so a shadowed password is outside the claim.
     const matching = groups.filter(row => id(row[2]) === gid);
+    if (matching.some(row => !['', 'x', '!', '*'].includes(row[1] ?? ''))) return false;
     return owner !== undefined && id(owner[3]) === gid && matching.length > 0 &&
       passwd.every(row => id(row[3]) !== gid || row === owner) &&
       matching.every(row => (row[3] ?? '').split(',').every(member => member === '' || member === owner[0]));

@@ -114,6 +114,15 @@ it.each([
   await expect(isUserPrivateGroup(1000, 1000, files(item.passwd, item.group), noUserdb)).resolves.toBe(false);
 });
 
+it.each([
+  { name: 'a shadowed group password', group: 'ann:x:1000:', safe: true },
+  { name: 'a locked group password', group: 'ann:!:1000:', safe: true },
+  { name: 'an empty group password', group: 'ann::1000:', safe: true },
+  { name: 'a group password hash readable in /etc/group', group: 'ann:$6$salt$hash:1000:', safe: false },
+])('classifies $name', async item => {
+  await expect(isUserPrivateGroup(1000, 1000, files('ann:x:1000:1000::/h:/bin/sh', item.group), noUserdb)).resolves.toBe(item.safe);
+});
+
 it('matches the owner and group across zero-padded spellings of the same id', async () => {
   await expect(isUserPrivateGroup(1000, 1000, files('ann:x:01000:001000::/h:/bin/sh', 'ann:x:01000:'), noUserdb)).resolves.toBe(true);
 });

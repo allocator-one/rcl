@@ -13,6 +13,8 @@
   member, no other user has it as primary group, and `/etc/passwd` repeats
   neither a username nor the owner's uid. Ids compare as numbers (`01000` is
   `1000`), and a row with an id that is not plain decimal is refused.
+  A password hash in `/etc/group` refuses the exemption; a password kept in
+  `/etc/gshadow` cannot be read without root and is outside the claim.
   `/etc/nsswitch.conf` must list `files`
   for `passwd` and `group` and name no other source than `files` or `systemd`
   for `passwd`, `group` and `initgroups`. `systemd` counts as local only while
