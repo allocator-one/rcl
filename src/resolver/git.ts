@@ -209,8 +209,9 @@ async function readPinnedPatch(
 ): Promise<Diff & { mergeBaseSha: string }> {
   let rawDiff: string;
   try {
+    // diff.relative would silently drop every file outside the reader's cwd.
     rawDiff = await readGit(['-c', 'core.quotepath=false', '-c', 'diff.algorithm=myers',
-      '-c', 'diff.indentHeuristic=true', 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
+      '-c', 'diff.indentHeuristic=true', '-c', 'diff.relative=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
       '--find-renames=50%', '--full-index', '--binary', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3',
       mergeBaseSha, headSha, '--'], maxBytes);
   } catch (error) {
