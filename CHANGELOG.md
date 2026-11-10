@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Resolve the temporary directories in `test/converge/fresh-review-close.test.ts`
+  to their real paths (RCL-237). On macOS `os.tmpdir()` is a symlink
+  (`/var/folders/…` to `/private/var/…`), so the fixtures tripped the review
+  cycle directory check, which correctly refuses a path that is not its own
+  real path. Three tests failed on a clean checkout there; the check is
+  unchanged.
+
 ## 4.5.35 - 2026-11-10
 
 - Make `rcl converge-status` resolve a pull request by every form it accepts
