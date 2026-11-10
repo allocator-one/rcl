@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.34 - 2026-11-10
+
 - Leave generated paths out of the reviewed patch of a PR (RCL-209). A release
   that refreshes a bundled, served artifact (harness-cli#93 changed a 4.2 MB
   OpenAPI spec and its generated help) could not be reviewed: the patch was
