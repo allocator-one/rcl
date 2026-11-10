@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
@@ -34,7 +34,7 @@ async function deadProcessIdentity() {
  * an interrupted `--start-over` leaves behind.
  */
 async function diedFixture(options: { results?: string[]; gitCommonDir?: string; unbound?: boolean } = {}) {
-  const gitCommonDir = options.gitCommonDir ?? await mkdtemp(join(tmpdir(), 'rcl-fresh-close-'));
+  const gitCommonDir = options.gitCommonDir ?? await realpath(await mkdtemp(join(tmpdir(), 'rcl-fresh-close-')));
   if (!options.gitCommonDir) roots.push(gitCommonDir);
   const target = 'rcl-42', headSha = 'a'.repeat(40), inputSha256 = 'b'.repeat(64), packetSha256 = 'c'.repeat(64);
   let active: import('../../src/converge/review-cycle.js').ReviewCycleReceipt | null = null;
@@ -151,7 +151,7 @@ it('refuses a manifest whose bytes differ from the reviewed digest', async () =>
 });
 
 it('previews and applies the close from the command line', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'rcl-fresh-close-cli-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-fresh-close-cli-')));
   roots.push(root);
   execFileSync('git', ['init', '-q'], { cwd: root, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } });
   const f = await diedFixture({ gitCommonDir: join(root, '.git') });
