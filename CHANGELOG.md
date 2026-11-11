@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.46 - 2026-11-11
+
 - Refuse the `cross-context-coupling` lens when it is requested by name without
   a `couplingLens` section, instead of warning and running a seat with no
   contexts that could only say nothing (RCL-242).
