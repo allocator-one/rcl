@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join, parse } from 'path';
  * Key distribution via Harness. When the repo under review carries a
  * committed `.harness-cli/config.json` (the "this repo belongs to the org"
  * signal, discovered git-style by walking up from the working directory)
- * and the user has run `harness login`, provider API keys missing from the
+ * and the user has run `infraone harness login`, provider API keys missing from the
  * environment are fetched from the Harness backend
  * (GET /api/v1/model-keys) and injected into the process environment.
  *
@@ -74,7 +74,7 @@ export interface HarnessKeyOptions {
    * Harness takes precedence over the environment (RCL-203): every provider
    * key in the env is dropped, then the ones Harness serves are injected, so
    * a provider Harness does not hold reads as missing instead of silently
-   * reusing an ambient key. This is what `harness keys exec --override`
+   * reusing an ambient key. This is what `infraone harness keys exec --override`
    * did, without the env-injecting wrapper an agent session cannot launch.
    * Any inability to fetch is reported as `failure`, never degraded.
    */
@@ -101,7 +101,7 @@ export function findHarnessRepoConfig(startDir: string): string | null {
 }
 
 /**
- * The credential `harness login` stores. The format is frozen on the
+ * The credential `infraone harness login` stores. The format is frozen on the
  * harness-cli side (exactly {url, token}) — see its core/credentials.ts.
  */
 export function defaultCredentialsPath(env: Record<string, string | undefined>): string {
@@ -137,7 +137,7 @@ async function readRepoOrg(startDir: string): Promise<string | null> {
   }
 }
 
-/** The custom hosts the user approved on `harness login` (harness-cli's trusted-hosts.json), independent of any repository. */
+/** The custom hosts the user approved on `infraone harness login` (harness-cli's trusted-hosts.json), independent of any repository. */
 async function readTrustedHosts(legacyPath: string): Promise<string[]> {
   try {
     const hosts = (JSON.parse(await readFile(join(dirname(legacyPath), 'trusted-hosts.json'), 'utf-8')) as { hosts?: unknown } | null)?.hosts;
@@ -170,7 +170,7 @@ export interface LoginOptions {
 }
 
 /**
- * The login credential `harness login` left for this repository, found as
+ * The login credential `infraone harness login` left for this repository, found as
  * harness-cli finds it: a repository whose `.harness-cli/config.json` names
  * an `org` has its own org-scoped file, which a fresh login writes while the
  * legacy `credentials.json` keeps its older token (RCL-211). The org file
@@ -327,7 +327,7 @@ export async function applyHarnessModelKeys(options: HarnessKeyOptions = {}): Pr
   if (credentials === null) {
     return {
       injected: [],
-      note: `Missing ${missing.map((p) => PROVIDER_ENV_VARS[p]).join(', ')} — this repo is Harness-managed; run \`harness login\` and rcl will fetch the keys for you.`,
+      note: `Missing ${missing.map((p) => PROVIDER_ENV_VARS[p]).join(', ')} — this repo is Harness-managed; run \`infraone harness login\` and rcl will fetch the keys for you.`,
     };
   }
 
@@ -372,7 +372,7 @@ async function applyHarnessKeysFirst(
     options.credential ??
     (await readLoginCredential({ env, cwd: options.cwd ?? process.cwd(),
       ...(options.credentialsPath !== undefined ? { credentialsPath: options.credentialsPath } : {}) }));
-  if (credentials === null) return refuse('not logged in to Harness; run `harness login`');
+  if (credentials === null) return refuse('not logged in to Harness; run `infraone harness login`');
 
   const fetched = await fetchModelKeys(credentials.url, credentials.token, options.fetchImpl ?? fetch,
     options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))));

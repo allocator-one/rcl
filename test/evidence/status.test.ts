@@ -212,7 +212,7 @@ describe('rcl evidence status', () => {
   it('exits 3 when the read cannot be answered: no credential, evidence off, not found, refused credential, unreachable', async () => {
     const noCredential = run('allocator-one/allocator-one#8524', () => ({ status: 200, body: {} }), {}, { env: {} });
     expect(await noCredential.code).toBe(EVIDENCE_EXIT.unanswered);
-    expect(noCredential.err.join('\n')).toMatch(/harness login/);
+    expect(noCredential.err.join('\n')).toMatch(/infraone harness login/);
     expect(noCredential.requests).toHaveLength(0);
 
     const off = run('allocator-one/allocator-one#8524', () => ({

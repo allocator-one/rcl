@@ -8,7 +8,7 @@ import {
  * Which Harness the evidence goes to, and with what (epic IO-12475,
  * section 8.5). Two sources, never mixed:
  *
- * - the stored `harness login` credential (the default), whose `{url, token}`
+ * - the stored `infraone harness login` credential (the default), whose `{url, token}`
  *   pair is indivisible — the token is only ever sent to the host that
  *   minted it;
  * - `HARNESS_API_TOKEN` + `HARNESS_API_URL` for CI, following harness-cli's
@@ -115,7 +115,7 @@ export async function resolveHarnessCredential(
   if (resolvedLogin === null) {
     return {
       repoManaged,
-      note: 'not logged in to Harness — run `harness login` (or set HARNESS_API_TOKEN and HARNESS_API_URL in CI).',
+      note: 'not logged in to Harness — run `infraone harness login` (or set HARNESS_API_TOKEN and HARNESS_API_URL in CI).',
     };
   }
   const stored = resolvedLogin.credential;
@@ -125,7 +125,7 @@ export async function resolveHarnessCredential(
   }
   const token = typeof stored.token === 'string' ? stored.token.trim() : '';
   if (token === '') {
-    return { repoManaged, note: 'the stored Harness login carries no token — run `harness login` again.' };
+    return { repoManaged, note: 'the stored Harness login carries no token — run `infraone harness login` again.' };
   }
   return { repoManaged, credential: { url: storedUrl, token, source: 'login' }, origin: resolvedLogin.origin };
 }

@@ -25,8 +25,8 @@ allowed-tools:
   - Bash(git add:*)
   - Bash(git commit:*)
   - Bash(git push:*)
-  - Bash(harness show:*)
-  - Bash(harness list:*)
+  - Bash(infraone harness show:*)
+  - Bash(infraone harness list:*)
   - Bash(npm view @allocator-one/rcl:*)
   - Bash(npm prefix -g)
   - Bash(npm test:*)
@@ -185,7 +185,7 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
 
    Pass `<ATTEMPT_CAP_ARG>` and `<ROUND_CAP_ARG>` only for explicitly user-approved caps. Exit 2 is the configured consent boundary: stop and ask before raising the relevant cap. Exit 3 is an accounting/infrastructure failure: report the error, not a request for a higher cap. Preflight refusal spends nothing. A durably claimed attempt remains spent after a crash, kill, inconclusive result or missing report.
 
-   **Harness-first provider keys.** When the repository's policy is that Harness supplies the provider keys ahead of the environment, add `--harness-keys-first` to the launch above. `rcl` then fetches the keys from the Harness login itself, ignores ambient provider keys and refuses the launch (`harness_keys_unavailable`, no attempt claimed) if it cannot — so never wrap the launch in `harness keys exec … -- <command>`: an agent session's permission classifier refuses that env-injecting wrapper (RCL-203). Check `"$RCL_BIN" review --help` for the flag and upgrade if it is missing.
+   **Harness-first provider keys.** When the repository's policy is that Harness supplies the provider keys ahead of the environment, add `--harness-keys-first` to the launch above. `rcl` then fetches the keys from the Harness login itself, ignores ambient provider keys and refuses the launch (`harness_keys_unavailable`, no attempt claimed) if it cannot — so never wrap the launch in `infraone harness keys exec … -- <command>`: an agent session's permission classifier refuses that env-injecting wrapper (RCL-203). Check `"$RCL_BIN" review --help` for the flag and upgrade if it is missing.
 
    `<EVIDENCE_ARG>` is `--evidence-required` when step 0a passed and empty otherwise. For a captured patch, `<HEAD_SHA_ARG>` supplies `--head-sha <HEAD_SHA>` and, when captured, `--base-sha <BASE_SHA>`; for direct PR/git targets it is empty because RCL resolves the heads. `<PR_REF_ARG>` is `--for-pr <owner>/<repo>#<N>` only for a patch captured from that PR. RCL resolves GitHub authentication only in PR mode; never inject GitHub credentials into patch review — keep `<TOKEN_ARG>` empty for a bare patch-file target.
 

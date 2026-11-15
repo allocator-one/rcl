@@ -104,7 +104,7 @@ seat fails with a connection error. Use provider prefixes.
 Repositories that carry a committed `.harness-cli/config.json` (discovered
 git-style, walking up from the working directory) can get their provider keys
 from a [Harness](https://harness.infra.one) backend instead of every teammate
-managing them by hand: run `harness login` once, and any provider key
+managing them by hand: run `infraone harness login` once, and any provider key
 **missing from the environment** is fetched from `GET /api/v1/model-keys` on
 the host that minted the stored login token, and injected for the run.
 
@@ -125,7 +125,7 @@ keys). rcl drops every provider key from the environment, injects the ones the
 login's Harness serves, and refuses the launch (`harness_keys_unavailable`)
 instead of falling back when it cannot: not logged in, an unreachable backend
 or `RCL_NO_HARNESS_KEYS` set. It needs no `.harness-cli/config.json`. Use it
-rather than wrapping the launch in `harness keys exec … --override --`: an
+rather than wrapping the launch in `infraone harness keys exec … --override --`: an
 agent session's permission classifier refuses that env-injecting wrapper, while
 `rcl` fetching its own keys is allowed (RCL-203).
 
@@ -740,7 +740,7 @@ strict severity gating for the round.
 | `OPENAI_COMPAT_BASE_URL` | Base URL for `openai-compat` models and unrecognized unprefixed names (default `http://localhost:11434/v1`) |
 | `OPENAI_COMPAT_API_KEY` | API key for that endpoint (default: the placeholder `local`) |
 | `GITHUB_TOKEN` | GitHub token for PR fetch and `--post` |
-| `XDG_CONFIG_HOME` | Where the `harness login` credential is read from (`$XDG_CONFIG_HOME/harness/credentials.json`; default `~/.config/harness/credentials.json`) |
+| `XDG_CONFIG_HOME` | Where the `infraone harness login` credential is read from (`$XDG_CONFIG_HOME/harness/credentials.json`; default `~/.config/harness/credentials.json`) |
 | `RCL_DATA_DIR` | Per-machine state directory (model stats, evidence outbox and quarantine); default `~/.rcl` |
 | `HOME` | Not required: `~` above falls back to the account's home in the password database |
 | `RCL_TELEMETRY` | `off` keeps every review on the machine |
@@ -817,7 +817,7 @@ important finding gates. For the full scoring algorithm, see
 ## Harness evidence and gate
 
 In a repository that carries `.harness-cli/config.json`, with a
-`harness login` (or `HARNESS_API_TOKEN` + `HARNESS_API_URL` in CI), every
+`infraone harness login` (or `HARNESS_API_TOKEN` + `HARNESS_API_URL` in CI), every
 review is recorded on [Harness](https://harness.infra.one) after the report is
 written: the run header, findings, reviewer calls, stats and — at the default
 `full` level — both report files, scrubbed for key-shaped strings. Provider
@@ -832,7 +832,7 @@ network: an outage spools the evidence to `~/.rcl/outbox/` for
 Harness computes two projections per pull request head from that evidence:
 
 - **advisory** — counts rounds recorded with any credential, such as a
-  developer's `harness login` or a CI token;
+  developer's `infraone harness login` or a CI token;
 - **enforced** — counts only **attested** rounds, recorded by the
   organization's gate workflow; attested rounds also drive the
   `Review Council` check run.
