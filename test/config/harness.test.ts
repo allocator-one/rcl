@@ -152,7 +152,7 @@ describe('harness key distribution', () => {
       fetchImpl: fakeFetch(() => ({ status: 200, body: KEYS_RESPONSE })),
     });
     expect(result.injected).toEqual([]);
-    expect(result.note).toContain('harness login');
+    expect(result.note).toContain('infraone harness login');
   });
 
   it('degrades silently on a non-200 (older backend without the endpoint)', async () => {
@@ -234,7 +234,7 @@ describe('harness key distribution', () => {
   it('ignores malformed credentials and unknown/blank served keys', async () => {
     await writeFile(credentialsPath, 'not json');
     const noCreds = await applyHarnessModelKeys({ cwd: repo, env: {}, credentialsPath });
-    expect(noCreds.note).toContain('harness login');
+    expect(noCreds.note).toContain('infraone harness login');
 
     await writeFile(
       credentialsPath,

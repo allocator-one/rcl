@@ -118,6 +118,6 @@ describe('resolveHarnessCredential', () => {
   it('explains a missing login', async () => {
     const resolved = await resolveHarnessCredential({ env: {}, cwd: repo, credentialsPath: join(repo, 'missing.json') });
     expect(resolved.credential).toBeUndefined();
-    expect(resolved.note).toMatch(/harness login/);
+    expect(resolved.note).toMatch(/infraone harness login/);
   });
 });

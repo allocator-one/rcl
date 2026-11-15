@@ -505,7 +505,7 @@ export class HarnessSink {
     if (status >= 500 || status === 429 || status === 408) {
       return { kind: 'unavailable', reason: `HTTP ${status}${message ? ` ${message}` : ''}` };
     }
-    // A rejected credential is not a rejected run: after `harness login` (or
+    // A rejected credential is not a rejected run: after `infraone harness login` (or
     // a fresh CI token) the same entry can still land, so it stays spooled.
     if (status === 401) {
       return { kind: 'unavailable', reason: `HTTP 401 credential rejected${message ? ` (${message})` : ''} - log in again` };

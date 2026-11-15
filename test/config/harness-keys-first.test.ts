@@ -144,7 +144,7 @@ describe('harness-first key precedence', () => {
       harnessFirst: true,
       fetchImpl: served({ anthropic: 'x' }),
     });
-    expect(result.failure).toMatch(/harness login/);
+    expect(result.failure).toMatch(/infraone harness login/);
   });
 
   it('fails closed when RCL_NO_HARNESS_KEYS disables the mechanism', async () => {

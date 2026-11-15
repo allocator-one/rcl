@@ -13,8 +13,8 @@ allowed-tools:
   - Bash(git rev-parse:*)
   - Bash(git diff:*)
   - Bash(env -u GIT_EXTERNAL_DIFF git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c color.ui=never diff:*)
-  - Bash(harness show:*)
-  - Bash(harness list:*)
+  - Bash(infraone harness show:*)
+  - Bash(infraone harness list:*)
   - Bash(npm view @allocator-one/rcl:*)
   - Bash(npm prefix -g)
   - Bash(which rcl)
@@ -123,11 +123,11 @@ Check these sources **in order** and use the first one that produces content:
 
 2. **Harness issue for the current work** — check for in-progress issues tied to this branch:
    ```bash
-   harness list --status in_progress --assignee me
+   infraone harness list --status in_progress --assignee me
    ```
    If there is an in-progress issue (task or epic), dump its details:
    ```bash
-   harness show <identifier>
+   infraone harness show <identifier>
    ```
    If the issue has a meaningful description and/or acceptance criteria, write them to `<SPEC>`:
    ```
@@ -331,13 +331,13 @@ Only include `--spec` if a spec was resolved in step 2 (`<SPEC>` is the exact pa
 
 ### 5a. Evidence (rcl ≥ 3.0)
 
-In a Harness-managed repository (one carrying `.harness-cli/config.json`) with a `harness login`, rcl records every review as evidence on Harness after writing the report files: the run header, findings, reviewer calls and both report files. It never blocks a review on the network — a failed delivery is spooled to `~/.rcl/outbox/` and retried at the start of the next rcl command or by `rcl telemetry flush`. Read the one dim status line rcl prints and relay it:
+In a Harness-managed repository (one carrying `.harness-cli/config.json`) with a `infraone harness login`, rcl records every review as evidence on Harness after writing the report files: the run header, findings, reviewer calls and both report files. It never blocks a review on the network — a failed delivery is spooled to `~/.rcl/outbox/` and retried at the start of the next rcl command or by `rcl telemetry flush`. Read the one dim status line rcl prints and relay it:
 
 - `Evidence recorded: <url>` — the run is on Harness; include the URL in the report back.
 - `Evidence spooled (Harness unreachable); run rcl telemetry flush` — retry with `rcl telemetry flush` (never by re-running the review, which would spend the council again).
 - `Evidence recorded: <url> (artifacts spooled; run rcl telemetry flush)` — the run landed but an artifact did not: the evidence is incomplete until `rcl telemetry flush --run <run id>` succeeds; report it as such, not as recorded.
 - `Evidence not sent: <host> has not enabled review evidence for this organization` — expected until the org switches it on; nothing to do.
-- `Evidence not sent: not logged in to Harness …` — tell the user to run `harness login` (CI sets `HARNESS_API_TOKEN` + `HARNESS_API_URL` instead).
+- `Evidence not sent: not logged in to Harness …` — tell the user to run `infraone harness login` (CI sets `HARNESS_API_TOKEN` + `HARNESS_API_URL` instead).
 
 The first delivery from a machine prints a one-time notice naming the host and what is sent. Opt out per run with `--no-telemetry`, per machine with `RCL_TELEMETRY=off`, or per project with `harness.telemetry: off` in the config; `harness.telemetry: findings` keeps the raw reports on the machine. Never pass `--no-telemetry` inside `{{PREFIX}}rcl-converge`. A patch-file review can only be evidence when `--head-sha` binds it to a commit.
 

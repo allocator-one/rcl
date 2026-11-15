@@ -26,7 +26,7 @@ the [README](https://github.com/allocator-one/rcl#harness-evidence-and-gate).
 ## Delivery
 
 In a repository that carries `.harness-cli/config.json` and with a
-`harness login` (or `HARNESS_API_TOKEN` + `HARNESS_API_URL` in CI), every
+`infraone harness login` (or `HARNESS_API_TOKEN` + `HARNESS_API_URL` in CI), every
 `rcl review` / `rcl review-plan` records the run on Harness after the report is
 written: the self-describing `run` header, one row per consensus finding (with
 its stable identity), one row per reviewer call (status, latency, token usage),
@@ -43,7 +43,7 @@ the parser message unless `harness.parseFailures: true` opts in to sending its
 answer with fenced code and key-shaped strings removed, capped at 32 KB.
 Scrubbing is pattern-based; it cannot recognize every secret.
 
-The stored login is the file `harness login` writes:
+The stored login is the file `infraone harness login` writes:
 `~/.config/harness/credentials.json`, or
 `$XDG_CONFIG_HOME/harness/credentials.json` when `XDG_CONFIG_HOME` is set to an
 absolute path. An environment token is used only together with
@@ -277,7 +277,7 @@ for kept findings and the rendered below-threshold appendix; the appendix still
 shows at most 20 findings and points to JSON for omitted entries.
 
 The reads use the same credential rules as delivery — the stored
-`harness login`, or `HARNESS_API_TOKEN` + `HARNESS_API_URL` in CI, the token
+`infraone harness login`, or `HARNESS_API_TOKEN` + `HARNESS_API_URL` in CI, the token
 sent to its own host only — and need `reviews:read`. They do not depend on the
 telemetry level: switching delivery off does not blind them. Both commands send
 only their normal GET requests. They neither fetch an artifact per finding nor
