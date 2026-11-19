@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.47 - 2026-11-19
+
 - Make `google/gemini-4-hydrogen` the default secondary specialist reviewer,
   replacing `google/gemini-3.8-flash`. In a 16-round replay it caught 14 of 26
   confirmed findings against 7, with no timeouts and a p90 of 104 s against
