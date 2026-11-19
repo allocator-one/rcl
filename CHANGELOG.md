@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Make `google/gemini-4-hydrogen` the default secondary specialist reviewer,
+  replacing `google/gemini-3.8-flash`. In a 16-round replay it caught 14 of 26
+  confirmed findings against 7, with no timeouts and a p90 of 104 s against
+  540 s (RCL-246).
+
 ## 4.5.46 - 2026-11-11
 
 - Refuse the `cross-context-coupling` lens when it is requested by name without

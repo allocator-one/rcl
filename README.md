@@ -55,7 +55,7 @@ first review:
 | Seat | Default model | Key |
 | --- | --- | --- |
 | General and specialist reviewers (blocking lane) | `anthropic/claude-opus-5-5`, `openai/gpt-6-sol` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` |
-| Specialist reviewer (secondary lane) | `google/gemini-3.8-flash` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` |
+| Specialist reviewer (secondary lane) | `google/gemini-4-hydrogen` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` |
 | Verifier for critical and important findings | `openai/gpt-6-astra` | `OPENAI_API_KEY` |
 | Async bonus reviewer (optional) | `openrouter/moonshotai/kimi-k3` | `OPENROUTER_API_KEY` |
 
@@ -536,7 +536,7 @@ models:
 
 # Specialist assignments only; no additional general reviewer.
 secondaryModels:
-  - google/gemini-3.8-flash
+  - google/gemini-4-hydrogen
 
 # Async bonus reviewers, fired with each round and never awaited. Results that
 # have arrived by the next round of the same target are merged into that

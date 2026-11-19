@@ -199,7 +199,7 @@ describe('default roster (RCL-25: core council + async bonus reviewer)', () => {
       'anthropic/claude-opus-5-5',
       'openai/gpt-6-sol',
     ]);
-    expect(config.secondaryModels).toEqual(['google/gemini-3.8-flash']);
+    expect(config.secondaryModels).toEqual(['google/gemini-4-hydrogen']);
   });
 
   it('keeps kimi-k3 as the default async (non-blocking) reviewer', async () => {
