@@ -20,8 +20,13 @@ export const DEFAULT_MODELS = [
  */
 export const DEFAULT_ASYNC_MODELS = ['openrouter/moonshotai/kimi-k3'] as const;
 
-/** Gemini contributes specialist reviews without adding a general-review seat. */
-export const DEFAULT_SECONDARY_MODELS = ['google/gemini-3.8-flash'] as const;
+/**
+ * Gemini contributes specialist reviews without adding a general-review seat.
+ * In a 16-round replay (RCL-246), gemini-4-hydrogen caught twice as many
+ * confirmed findings as gemini-3.8-flash, with no timeouts and a lower cost
+ * per round.
+ */
+export const DEFAULT_SECONDARY_MODELS = ['google/gemini-4-hydrogen'] as const;
 
 export const DEFAULT_THRESHOLDS = {
   minConsensusScore: 0.4,

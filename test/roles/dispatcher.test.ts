@@ -15,7 +15,7 @@ describe('default council roster', () => {
     expect(assignments).toHaveLength(seats);
     expect(assignments.filter((assignment) => assignment.role.name === 'general').map((assignment) => assignment.model))
       .toEqual([...DEFAULT_MODELS]);
-    expect(assignments.some(a => a.model === 'google/gemini-3.8-flash' && a.role.isSpecialized)).toBe(true);
+    expect(assignments.some(a => a.model === DEFAULT_SECONDARY_MODELS[0] && a.role.isSpecialized)).toBe(true);
     expect(assignments.some((assignment) => ['project-rules', 'dead-code'].includes(assignment.role.name))).toBe(false);
     expect(resolveQuorumPolicy(assignments.length).minimumSuccessful).toBe(quorum);
   });
