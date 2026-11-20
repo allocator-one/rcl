@@ -21,6 +21,7 @@ import { dirname, join, resolve } from 'path';
 import { installHttp1Transport } from './dispatch/http1-transport.js';
 import { loadConfig } from './config/loader.js';
 import { applyHarnessModelKeys } from './config/harness.js';
+import { resolveCodeIndex, type CodeIndexRecord } from './codeindex/select.js';
 import {
   DEFAULT_MODELS,
   DEFAULT_TIMEOUT_MS,
@@ -402,6 +403,8 @@ program
   .option('--max-review-chunks <n>', 'Explicit full-patch capacity, up to 512 lossless chunks (default 32)')
   .option('--max-blocking-calls <n>', 'Explicit paid-work capacity, up to 8192 blocking calls (default 512)')
   .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
+  .option('--no-code-index', 'Do not query the Harness code index for this review')
+  .option('--code-view <id>', 'Harness code index view to read (default: the view `infraone harness code status` reports for this directory)')
   .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
   .option('--config <path>', 'Path to config file')
   .option(
@@ -1851,6 +1854,10 @@ interface CouncilCliOpts {
   maxBlockingCalls?: string;
   /** commander: `--no-telemetry` sets this false. */
   telemetry?: boolean;
+  /** commander: `--no-code-index` sets this false (RCL-248). */
+  codeIndex?: boolean;
+  /** `--code-view <id>`: the code index view to read. */
+  codeView?: string;
   /** Exit 4 unless the evidence envelope was acknowledged. */
   evidenceRequired?: boolean;
   /** GitHub Actions gate workflow: exchange the job OIDC token for a run-bound credential (RCL-40). */
@@ -2485,10 +2492,23 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       }
     }
 
+    // The code index informs the review only when a fresh view describes this
+    // code; any other outcome is recorded in the header and changes nothing else.
+    const { record: codeIndex } = await resolveCodeIndex({
+      ...(config.codeIndex?.enabled !== undefined ? { configEnabled: config.codeIndex.enabled } : {}),
+      flagDisabled: opts.codeIndex === false,
+      ...(opts.codeView !== undefined ? { codeView: opts.codeView } : {}),
+      target: { kind: runTarget.kind, ...(runTarget.headSha !== undefined ? { headSha: runTarget.headSha } : {}) },
+      cwd: process.cwd(),
+      env: process.env,
+      ...(attestation ? { credential: attestation.credential } : {}),
+    });
+
     await executeCouncil(spinner, prepared, diff, opts, {
       command: 'review',
       target: runTarget,
       asyncTargetLabel,
+      codeIndex,
       ...(attestation ? { attestation } : {}),
     });
   } catch (err) {
@@ -2616,6 +2636,8 @@ async function executeCouncil(
     asyncTargetLabel?: string;
     /** `--attest`: the run-bound credential and the run id it binds (RCL-40). */
     attestation?: Attestation;
+    /** What the Harness code index contributed to this run, for the header (RCL-248). */
+    codeIndex?: CodeIndexRecord;
     pendingResume?: PendingLegacyResumeExecution;
     /** Journal of an ordinary guarded council (RCL-80), opened under the launch's ownership. */
     ordinaryCheckpoint?: OrdinaryCheckpoint & { ownership: NativeTargetOwnership; plan: FrozenCheckpointPlan };
@@ -3339,6 +3361,7 @@ async function executeCouncil(
         gating: prepared.gatingConfig,
       }),
       ...(prepared.spec ? { spec: prepared.spec } : {}),
+      ...(extra.codeIndex ? { codeIndex: extra.codeIndex } : {}),
       contextFiles: contextDocs.map((d) => ({ path: d.label, sha256: d.sha256 })),
       // Record the effective focus that shaped the plan prompts.
       ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? PLAN_DEFAULT_FOCUS } } : {}),

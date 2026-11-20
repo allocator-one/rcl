@@ -8,6 +8,7 @@ import type { ReviewAssignment } from '../roles/types.js';
 import { detectProvider } from '../roles/dispatcher.js';
 import type { ReviewerEvidenceDescriptor } from './reviewer-evidence.js';
 import { uuidv7 } from './uuid.js';
+import type { CodeIndexRecord } from '../codeindex/select.js';
 
 /**
  * The self-describing report header (evidence ledger, epic IO-12475
@@ -98,6 +99,8 @@ export interface RunHeader {
     strict_fallback?: StrictFallbackMarker;
   };
   spec?: { source: SpecSource; sha256: string };
+  /** Whether the Harness code index informed this run, and which view or why not (RCL-248). */
+  codeIndex?: CodeIndexRecord;
   context_files: Array<{ path: string; sha256: string }>;
   /** review-plan only: the effective focus mode, which shapes the prompts. */
   plan?: { focus: string };
@@ -151,6 +154,7 @@ export interface RunHeaderInput {
   /** The whole-pass bound the verification pass applied, when larger than the configured one. */
   verificationPassEffectiveTimeoutMs?: number;
   spec?: { source: SpecSource; sha256: string };
+  codeIndex?: CodeIndexRecord;
   contextFiles?: Array<{ path: string; sha256: string }>;
   plan?: { focus: string };
   runner: RunnerClaim;
@@ -313,6 +317,7 @@ export const DIGESTED_CONFIG_FIELDS = [
   'context',
   'spec',
   'focus',
+  'codeIndex',
 ] as const satisfies ReadonlyArray<Exclude<keyof Config, (typeof EXCLUDED_CONFIG_FIELDS)[number]>>;
 
 // Compile-time exhaustiveness: a Config key in neither list fails the build.
@@ -551,6 +556,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
       ...(input.strictFallback ? { strict_fallback: { version: input.strictFallback.version, cause: input.strictFallback.cause } } : {}),
     },
     ...(input.spec ? { spec: { source: input.spec.source, sha256: input.spec.sha256 } } : {}),
+    ...(input.codeIndex ? { codeIndex: { ...input.codeIndex } } : {}),
     context_files: (input.contextFiles ?? []).map((c) => ({ path: c.path, sha256: c.sha256 })),
     ...(input.plan ? { plan: { focus: input.plan.focus } } : {}),
     runner: { ...input.runner },

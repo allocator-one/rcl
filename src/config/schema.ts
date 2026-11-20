@@ -132,6 +132,25 @@ export const HarnessSchema = z.object({
   parseFailures: z.boolean().optional(),
 });
 
+/**
+ * Harness code index (RCL-247). Reviewers get cited answers from the index
+ * when a fresh view describes the code under review; otherwise the review runs
+ * as it does without it. `enabled` defaults to on; each lens has its own switch
+ * (default off until the lens ships) and the byte budgets bound what the index
+ * adds to a prompt.
+ */
+export const CodeIndexSchema = z.object({
+  enabled: z.boolean().optional(),
+  /** Per-lens switches by lens name. */
+  lenses: z.record(z.string(), z.boolean()).optional(),
+  budgets: z.object({
+    /** Bytes of index material added to one reviewer prompt, all lenses together. */
+    totalBytes: z.number().int().nonnegative().optional(),
+    /** Bytes one lens may add, by lens name. */
+    perLensBytes: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  }).strict().optional(),
+}).strict();
+
 export const ConfigSchema = z.object({
   models: z.array(z.string()).optional(),
   secondaryModels: z.array(z.string()).optional(),
@@ -174,10 +193,12 @@ export const ConfigSchema = z.object({
   spec: z.string().optional(),
   focus: z.array(z.string()).optional(),
   harness: HarnessSchema.optional(),
+  codeIndex: CodeIndexSchema.optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type ReviewerPair = z.infer<typeof ReviewerPairSchema>;
+export type CodeIndexConfig = z.infer<typeof CodeIndexSchema>;
 export type CouplingLensConfig = z.infer<typeof CouplingLensSchema>;
 export type RoleConfig = z.infer<typeof RoleConfigSchema>;
 export type Thresholds = z.infer<typeof ThresholdsSchema>;

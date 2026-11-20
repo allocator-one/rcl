@@ -202,6 +202,7 @@ function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
     findings: derived.consensus.reportFindings }, projection.health).exitCode);
   const header = buildRunHeader({ ...input.assembly.run, config: structuredClone(captured.config), diff: input.assembly.diff,
     thresholds: { ...aggregation.thresholds }, gating: { ...aggregation.gating },
+    ...(report.run.codeIndex ? { codeIndex: report.run.codeIndex } : {}),
     finishedAt: new Date(report.run.finished_at), ciExitCode: reportedCiExitCode });
   const expected = sanitizeForDelivery({ ...body, run: { ...header,
     ...(Object.hasOwn(report.run, 'reviewer_evidence') ? { reviewer_evidence: describeReviewerEvidence(successor.proof, supplementalAsync) } : {}) } }, representation);

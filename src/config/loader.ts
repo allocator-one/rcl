@@ -155,5 +155,6 @@ function mergeWithDefaults(config: Config, preserveDefaultRoster = false): Confi
     spec: config.spec,
     focus: config.focus,
     harness: config.harness,
+    codeIndex: config.codeIndex,
   };
 }
