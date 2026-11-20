@@ -52,6 +52,8 @@ If the old review is active, stop only its recorded host task when replacement w
 
 ### 0. Private artifact directory
 
+**Filter `PATH` first, in this same shell, before any command, including the ones below**: run the block in step 3 (it uses only shell builtins, so nothing in it resolves through the `PATH` it is filtering) before `id`, `mkdir` or the first `gh` or `git`, so that every external command after it resolves through a `PATH` without the repository's own entries. A fresh shell starts from the ambient `PATH` again: run the block first in every command sequence you start in one (`rcl_run` does its own).
+
 All temporary artifacts below (patches, specs, reports, logs, PID files) live under `<RCL_TMP>` = `/tmp/rcl-<uid>` (your numeric `id -u`) — never directly in world-writable `/tmp`, where another local user could pre-create, symlink, or tamper with predictable filenames. Create and verify it once per session:
 
 ```bash
@@ -59,8 +61,6 @@ RCL_TMP=/tmp/rcl-$(id -u); mkdir -p "$RCL_TMP" && [ ! -L "$RCL_TMP" ] && [ -d "$
 ```
 
 Order matters: the symlink and ownership checks run **before** `chmod`, because a `chmod` on a pre-created symlink would follow it and re-permission someone else's directory before the check could reject it. If any check fails, stop — never write artifacts to a directory you do not exclusively own. `<RCL_TMP>` below is a **textual placeholder**: substitute the resolved path (e.g. `/tmp/rcl-501`) when writing each command, rather than relying on `$RCL_TMP` surviving into a detached or single-quoted shell. Shell-quote every dynamic value that enters a generated command.
-
-**Then filter `PATH`, in this same shell, before any other command**: run the block in step 3 (it uses only shell builtins, so nothing in it resolves through the `PATH` it is filtering) before the first `gh` or `git` of step 1, so that `gh`, `git`, `npm` and `node` resolve through a `PATH` without the repository's own entries. A fresh shell starts from the ambient `PATH` again: run the block first in every command sequence you start in one (`rcl_run` does its own).
 
 ### 1. Resolve the review target
 
@@ -85,7 +85,7 @@ Use `<REPO>#<PR_NUMBER>` as the review target.
 
 #### 1b. Local diff review (no PR)
 
-Generate a patch from the current branch against its merge-base with the remote default branch (`origin/HEAD`, falling back to `origin/main`). Scope the patch path by branch so a parallel session in another repository or worktree can never overwrite this review's input between generation and the review run. Let `<REPO>` be the repository directory name and `<BRANCH>` the branch name, each with every character outside `[A-Za-z0-9._-]` replaced by `-` (git allows shell metacharacters like `$`, `;`, and quotes in branch names — never interpolate an unsanitized name into a path or command). Replacing characters can map two different names to one (`feat/a` and `feat-a`): when a component was changed by the replacement, append `-` and the first 8 hex characters of the SHA-256 of its original text, so distinct names never share a patch, report or target (a name that needed no change stays as it is):
+Generate a patch from the current branch against its merge-base with the remote default branch (`origin/HEAD`, falling back to `origin/main`). Scope the patch path by branch so a parallel session in another repository or worktree can never overwrite this review's input between generation and the review run. Let `<REPO>` be the repository directory name and `<BRANCH>` the branch name, each with every character outside `[A-Za-z0-9._-]` replaced by `-` (git allows shell metacharacters like `$`, `;`, and quotes in branch names — never interpolate an unsanitized name into a path or command), and let `<BRANCH>` end in `-` and the first 8 hex characters of the SHA-256 of the original repository directory name, a newline and the original branch name, whether or not anything was replaced. Replacing characters can map two different names to one (`feat/a` and `feat-a`), and joining the two components with `-` is ambiguous as well (repository `a-b` with branch `c`, and repository `a` with branch `b-c`, would both give `a-b-c`); the hash of the original pair keeps distinct repository/branch pairs from sharing a patch, report or target:
 
 ```bash
 DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
@@ -292,7 +292,7 @@ This launch command is deliberately not in `allowed-tools` and is expected to pr
 
 **Always write the full report to files** with `--markdown` and `--json-file`. The console output is long and the critical/important findings print at the top, so reading it off stdout — especially piped through `head`/`tail` — silently drops the most important findings. The files are the source of truth; the console is throwaway.
 
-Scope the report filenames to the review target so parallel runs (multiple worktrees or parallel agent sessions reviewing different PRs at once) never clobber each other's report. Let `<TARGET>` be `<REPO>-<PR number>` in PR mode, or `<REPO>-<BRANCH>` in local diff mode (components sanitized as in step 1b — identical PR numbers or branch names in different repositories must not collide) — e.g. `<RCL_TMP>/rcl-report-rcl-7.md` or `<RCL_TMP>/rcl-report-rcl-feat-openrouter-kimi-k3.md`.
+Scope the report filenames to the review target so parallel runs (multiple worktrees or parallel agent sessions reviewing different PRs at once) never clobber each other's report. Let `<TARGET>` be `<REPO>-<PR number>` in PR mode, or `<REPO>-<BRANCH>` in local diff mode (components sanitized, and `<BRANCH>` hashed, as in step 1b — identical PR numbers or branch names in different repositories must not collide; a PR number is digits only, so `<REPO>-<PR number>` cannot be confused with another pair) — e.g. `<RCL_TMP>/rcl-report-rcl-7.md` or `<RCL_TMP>/rcl-report-rcl-feat-openrouter-kimi-k3.md`.
 
 For PR-based review:
 ```bash
