@@ -27,6 +27,19 @@ npm install -g @allocator-one/rcl
 
 Requires Node.js 20 or later. The command is `rcl`.
 
+### Infra One repositories use the `infraone` fork
+
+Infra One's own repositories do not use this package. They use a fork of Review
+Council that ships inside the `infraone` CLI and runs as `infraone rcl …`
+(`npm i -g @allocator-one/infraone` or `brew install infraone`). The fork exists
+for features that need Infra One-only capabilities, such as the code index
+lenses (RCL-247); those are built in the fork only. It forked from `rcl` 4.5.47
+and keeps `.review-council.yml` and the skill names `/rcl` and `/rcl-converge`.
+
+`@allocator-one/rcl` continues unchanged, with its own releases, for everyone
+else; nothing on this page changes for you. The fork declares no `rcl`
+executable, so it installs beside this package.
+
 ### Migrating from `review-council`
 
 Earlier releases were published as `review-council`. Both packages install the
