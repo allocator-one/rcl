@@ -63,7 +63,8 @@ describe('vendored skills', () => {
         expect(content, path).toContain('never pin a version');
         expect(content, path).toContain('npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
         // The legacy package owns the same `rcl` bin; it must be removed before the install, never installed.
-        expect(content, path).toContain('cd <RCL_TMP> && npm uninstall -g --ignore-scripts review-council &&\n  npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
+        expect(content, path).toContain('(cd <RCL_TMP> && npm uninstall -g --ignore-scripts review-council &&\n  npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
+        expect(content.split('no PATH entry is left outside the repository under review').length - 1, path).toBe(2);
         expect(content, path).not.toMatch(/npm (install|view)[^\n]*review-council@/);
         expect(content, path).toContain('Bash(npm view @allocator-one/rcl:*)');
         expect(content, path).toContain('dist.integrity --prefix <RCL_TMP> --registry https://registry.npmjs.org --@allocator-one:registry=https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true)" = "<RCL_INTEGRITY>"');
