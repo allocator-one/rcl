@@ -63,10 +63,17 @@ describe('vendored skills', () => {
         expect(content, path).toContain('never pin a version');
         expect(content, path).toContain('npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
         // The legacy package owns the same `rcl` bin; it must be removed before the install, never installed.
-        expect(content, path).toContain('npm uninstall -g --ignore-scripts review-council &&\n  npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
+        expect(content, path).toContain('cd <RCL_TMP> && npm uninstall -g --ignore-scripts review-council &&\n  npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
         expect(content, path).not.toMatch(/npm (install|view)[^\n]*review-council@/);
         expect(content, path).toContain('Bash(npm view @allocator-one/rcl:*)');
-        expect(content, path).toContain('dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null)" = "<RCL_INTEGRITY>"');
+        expect(content, path).toContain('dist.integrity --prefix <RCL_TMP> --registry https://registry.npmjs.org --@allocator-one:registry=https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true)" = "<RCL_INTEGRITY>"');
+        // --ca=null/--cafile=null hang or fail on npm 11 (CLI-179); a project .npmrc is kept out by running from the private directory.
+        for (const block of content.match(/```bash\n[\s\S]*?\n```/g) ?? []) {
+          if (/\bnpm /.test(block)) expect(block, path).not.toMatch(/--ca=null|--cafile=null/);
+          expect(block, path).not.toMatch(/printenv|\| tr /);
+        }
+        expect(content, path).toContain('--@allocator-one:registry=https://registry.npmjs.org');
+        expect(content, path).toContain('/usr/bin/env -i "$@"');
         expect(content, path).toContain('--registry https://registry.npmjs.org');
         expect(content, path).toContain('--proxy=null');
         expect(content, path).not.toContain('NPM_TRUST_FLAGS');
