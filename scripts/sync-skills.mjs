@@ -38,10 +38,10 @@ export function readConsumers(path = join(ROOT, 'skills', 'consumers.json')) {
     if (!REPO_PATTERN.test(repo ?? '')) throw new Error(`invalid consumer repository: ${repo}`);
     if (!/^[A-Za-z0-9._/-]+$/.test(base ?? '')) throw new Error(`invalid base branch for ${repo}: ${base}`);
     // The workflow's app token is minted for the allocator-one organization only, so a consumer elsewhere could never be reached.
-    if (!repo.startsWith('allocator-one/')) throw new Error(`consumer outside the allocator-one organization: ${repo}`);
-    if (repo === 'allocator-one/rcl') throw new Error('rcl cannot consume its own skills');
-    if (seen.has(repo)) throw new Error(`duplicate consumer: ${repo}`);
-    seen.add(repo);
+    if (!repo.toLowerCase().startsWith('allocator-one/')) throw new Error(`consumer outside the allocator-one organization: ${repo}`);
+    if (repo.toLowerCase() === 'allocator-one/rcl') throw new Error('rcl cannot consume its own skills');
+    if (seen.has(repo.toLowerCase())) throw new Error(`duplicate consumer: ${repo}`);
+    seen.add(repo.toLowerCase());
   }
   return consumers;
 }
@@ -208,10 +208,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     console.log(`no consumers configured in skills/consumers.json; nothing to sync for ${ref}`);
     process.exit(0);
   }
-  assertCheckoutMatchesRef(ref);
-  const files = renderVendoredFiles(ref);
   const consumers = configured.filter((consumer) => !only || consumer.repo === only);
   if (only && consumers.length === 0) throw new Error(`${only} is not a configured consumer`);
+  assertCheckoutMatchesRef(ref);
+  const files = renderVendoredFiles(ref);
   let failed = 0;
   for (const consumer of consumers) {
     try {

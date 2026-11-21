@@ -134,6 +134,10 @@ describe('sync consumers', () => {
     // the app token is minted for allocator-one only: a consumer under another owner could never be written
     expect(() => readConsumers(write({ consumers: [{ repo: 'someone-else/app', base: 'main' }] }))).toThrow(/outside the allocator-one organization/);
     expect(readConsumers(write({ consumers: [{ repo: 'allocator-one/outside-app', base: 'main' }] }))).toHaveLength(1);
+    // GitHub names are case-insensitive: the owner check, the self check and the duplicate check agree
+    expect(readConsumers(write({ consumers: [{ repo: 'Allocator-One/Outside-App', base: 'main' }] }))).toHaveLength(1);
+    expect(() => readConsumers(write({ consumers: [{ repo: 'Allocator-One/RCL', base: 'main' }] }))).toThrow(/own skills/);
+    expect(() => readConsumers(write({ consumers: [{ repo: 'allocator-one/a', base: 'main' }, { repo: 'Allocator-One/A', base: 'main' }] }))).toThrow(/duplicate/);
     expect(consumerRepositoryNames([{ repo: 'a/one', base: 'main' }, { repo: 'a/two', base: 'main' }])).toBe('one,two');
     expect(consumerRepositoryNames([])).toBe('');
   });
@@ -147,7 +151,9 @@ describe('sync consumers', () => {
     expect(names.status, names.stderr).toBe(0);
     expect(names.stdout).toBe('\n');
     // naming a consumer that is not configured is still an error, never a silent no-op
-    expect(run('--ref', 'v9.9.9', '--only', 'allocator-one/harness-cli').status).toBe(1);
+    const unconfigured = run('--ref', 'v9.9.9', '--only', 'allocator-one/harness-cli');
+    expect(unconfigured.status).toBe(1);
+    expect(unconfigured.stderr).toMatch(/allocator-one\/harness-cli is not a configured consumer/);
   });
 
   it('derive the workflow token and sync from the consumer list, and skip both when it is empty', () => {
