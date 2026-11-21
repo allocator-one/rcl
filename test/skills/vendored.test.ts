@@ -182,3 +182,37 @@ describe('sync consumers', () => {
     expect([...dirs].sort()).toEqual([...(ownedDirs() as string[])].sort());
   });
 });
+
+describe('the skill text is npm rcl\'s own (CLI-179 port)', () => {
+  const rcl = () => readSource('rcl') as string;
+  const converge = () => readSource('rcl-converge') as string;
+
+  it('names no fork-only marker, command or feature', () => {
+    for (const text of [rcl(), converge()]) {
+      expect(text).not.toMatch(/infraone[- ]rcl/);
+      expect(text).not.toMatch(/--code-view|code index|harness code|view_changed|@allocator-one\/infraone/i);
+    }
+    expect(converge()).toContain('<!-- rcl-converge-final:<TARGET>:<HEAD_SHA> -->');
+  });
+
+  it('keeps distinct names apart: a replaced or cut component, and the checkout path, are hashed (12 hex)', () => {
+    for (const text of [rcl(), converge()]) {
+      expect(text).toContain('first 12 hex characters of the SHA-256 of the absolute path of');
+      expect(text).toMatch(/replaced or cut also ends in `-` and the first 12 hex characters of the SHA-256 of its original text/);
+      expect(text).not.toContain('first 8 hex characters');
+    }
+  });
+
+  it('never reclaims a stale lock itself, and says why', () => {
+    const text = converge();
+    expect(text).toContain('Never remove it yourself');
+    expect(text).not.toContain('<lock>.reclaim');
+    expect(text).toContain('the user removes it');
+  });
+
+  it('forwards only exported variables through the launch helper', () => {
+    const text = rcl();
+    expect(text).toContain('rcl_exported=$(export -p)');
+    expect(text).toContain('only a variable that is exported, not a shell variable that merely has the name, is forwarded');
+  });
+});

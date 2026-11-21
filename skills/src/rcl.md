@@ -94,7 +94,7 @@ Use `<REPO>#<PR_NUMBER>` as the review target.
 
 #### 1b. Local diff review (no PR)
 
-Generate a patch from the current branch against its merge-base with the remote default branch (`origin/HEAD`, falling back to `origin/main`). Scope the patch path by branch so a parallel session in another repository or worktree can never overwrite this review's input between generation and the review run. Let `<REPO>` be the repository directory name and `<BRANCH>` the branch name, each with every character outside `[A-Za-z0-9._-]` replaced by `-` and then cut to its first 80 characters (git allows shell metacharacters like `$`, `;`, and quotes in branch names — never interpolate an unsanitized name into a path or command — and a valid branch name can be longer than a file name may be), and let `<BRANCH>` end in `-` and the first 8 hex characters of the SHA-256 of the original repository directory name, a newline and the original branch name, whether or not anything was replaced. Replacing characters can map two different names to one (`feat/a` and `feat-a`), and joining the two components with `-` is ambiguous as well (repository `a-b` with branch `c`, and repository `a` with branch `b-c`, would both give `a-b-c`); the hash of the original pair keeps distinct repository/branch pairs from sharing a patch, report or target:
+Generate a patch from the current branch against its merge-base with the remote default branch (`origin/HEAD`, falling back to `origin/main`). Scope the patch path by branch so a parallel session in another repository or worktree can never overwrite this review's input between generation and the review run. Let `<REPO>` be the repository directory name and `<BRANCH>` the branch name, each with every character outside `[A-Za-z0-9._-]` replaced by `-` and then cut to its first 80 characters (a component that was replaced or cut also ends in `-` and the first 12 hex characters of the SHA-256 of its original text, so a repository that differs from another only past the 80th character, or only in the replaced characters, never shares a patch, report or target) (git allows shell metacharacters like `$`, `;`, and quotes in branch names — never interpolate an unsanitized name into a path or command — and a valid branch name can be longer than a file name may be), and let `<BRANCH>` end in `-` and the first 12 hex characters of the SHA-256 of the absolute path of the repository's top-level directory, a newline and the original branch name, whether or not anything was replaced (the path, not only the directory name, tells two checkouts of one repository apart). Replacing characters can map two different names to one (`feat/a` and `feat-a`), and joining the two components with `-` is ambiguous as well (repository `a-b` with branch `c`, and repository `a` with branch `b-c`, would both give `a-b-c`); the hash keeps distinct checkout/branch pairs from sharing a patch, report or target:
 
 ```bash
 DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
@@ -290,10 +290,12 @@ rcl_run() {
   done
   [ -n "$RCL_SAFE_PATH" ] || { echo "no PATH entry is left outside the repository under review" >&2; return 1; }
   set -- "PATH=${RCL_SAFE_PATH#:}" "$@"
+  rcl_exported=$(export -p)
   for name in HOME USER LANG LC_ALL TERM TMPDIR XDG_CONFIG_HOME RCL_TELEMETRY RCL_DEBUG \
       ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY \
       OPENAI_COMPAT_API_KEY OPENAI_COMPAT_BASE_URL HARNESS_API_TOKEN HARNESS_API_URL; do
-    eval "rcl_set=\${$name+set}"
+    # only a variable that is exported, not a shell variable that merely has the name, is forwarded
+    case "$rcl_exported" in *"export $name="*|*"declare -x $name="*) eval "rcl_set=\${$name+set}" ;; *) rcl_set="" ;; esac
     if [ -n "$rcl_set" ]; then eval "rcl_value=\${$name}"; set -- "$name=$rcl_value" "$@"; fi
   done
   /usr/bin/env -i "$@"
