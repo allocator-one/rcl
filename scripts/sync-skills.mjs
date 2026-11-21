@@ -37,6 +37,8 @@ export function readConsumers(path = join(ROOT, 'skills', 'consumers.json')) {
   for (const { repo, base } of consumers) {
     if (!REPO_PATTERN.test(repo ?? '')) throw new Error(`invalid consumer repository: ${repo}`);
     if (!/^[A-Za-z0-9._/-]+$/.test(base ?? '')) throw new Error(`invalid base branch for ${repo}: ${base}`);
+    // The workflow's app token is minted for the allocator-one organization only, so a consumer elsewhere could never be reached.
+    if (!repo.startsWith('allocator-one/')) throw new Error(`consumer outside the allocator-one organization: ${repo}`);
     if (repo === 'allocator-one/rcl') throw new Error('rcl cannot consume its own skills');
     if (seen.has(repo)) throw new Error(`duplicate consumer: ${repo}`);
     seen.add(repo);

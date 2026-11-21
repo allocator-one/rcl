@@ -132,7 +132,7 @@ The mechanism stays for an outside consumer that may be added later. It needs a
 GitHub App with Contents and Pull requests write access, installed on exactly
 the consumer repositories: its client ID in the `RCL_SKILL_SYNC_APP_ID`
 variable and its private key in the `RCL_SKILL_SYNC_APP_PRIVATE_KEY` secret.
-To add a consumer, add it to `skills/consumers.json` (the workflow derives the
+To add a consumer, add it to `skills/consumers.json` (it must be an `allocator-one/` repository, since the app token is minted for that organization only; the workflow derives the
 app token's `repositories` from that file, so there is no second list) and to the
 app installation. The skill directories in a consumer belong to the sync: their
 own review rules go in their `AGENTS.md` or `CLAUDE.md`. To resync by hand,

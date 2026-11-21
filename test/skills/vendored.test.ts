@@ -131,6 +131,9 @@ describe('sync consumers', () => {
     expect(() => readConsumers(write({ consumers: 'x' }))).toThrow(/consumers array/);
     expect(() => readConsumers(write({ consumers: [{ repo: 'allocator-one/rcl', base: 'main' }] }))).toThrow(/own skills/);
     expect(() => readConsumers(write({ consumers: [{ repo: 'bad repo', base: 'main' }] }))).toThrow(/invalid consumer/);
+    // the app token is minted for allocator-one only: a consumer under another owner could never be written
+    expect(() => readConsumers(write({ consumers: [{ repo: 'someone-else/app', base: 'main' }] }))).toThrow(/outside the allocator-one organization/);
+    expect(readConsumers(write({ consumers: [{ repo: 'allocator-one/outside-app', base: 'main' }] }))).toHaveLength(1);
     expect(consumerRepositoryNames([{ repo: 'a/one', base: 'main' }, { repo: 'a/two', base: 'main' }])).toBe('one,two');
     expect(consumerRepositoryNames([])).toBe('');
   });
