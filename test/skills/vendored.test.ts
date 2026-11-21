@@ -230,6 +230,7 @@ describe('the skill text is npm rcl\'s own (CLI-179 port)', () => {
     expect(rcl()).toContain('[ ! -L "$RCL_TMP/package.json" ]');
     // only a repository owner, member or collaborator can have posted the marker that silences the summary
     expect(converge()).toContain('author_association == "OWNER"');
+    expect(converge()).toContain('or .user.login == "<LOGIN>"');
     expect(converge()).toContain('when the lookup itself fails, post nothing and tell the user');
     expect(converge()).toContain('in lower case');
     expect(rcl()).toContain('RCL_TELEMETRY RCL_DEBUG RCL_DATA_DIR');
