@@ -3,7 +3,9 @@ name: Sync skills
 # After every successful Release, render the vendored rcl and rcl-converge
 # skills from the released tag and open or update one sync pull request in each
 # repository listed in skills/consumers.json. Consumers therefore only ever
-# receive skills that match a published @allocator-one/rcl.
+# receive skills that match a published @allocator-one/rcl. With no consumers
+# (none today: the Infra One repositories vendor from the infraone fork) the run
+# says so and succeeds without minting a token or touching any repository.
 on:
   workflow_run:
     workflows: [Release]
@@ -77,18 +79,32 @@ jobs:
         with:
           node-version: 24
 
+      - name: Read consumers
+        id: consumers
+        run: |
+          repos=$(node scripts/sync-skills.mjs --print-repositories)
+          echo "repositories=$repos" >> "$GITHUB_OUTPUT"
+          if [ -z "$repos" ]; then
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            echo "No consumers configured in skills/consumers.json; nothing to sync."
+          else
+            echo "count=1" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate token
         id: app-token
+        if: steps.consumers.outputs.count != '0'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.RCL_SKILL_SYNC_APP_ID }}
           private-key: ${{ secrets.RCL_SKILL_SYNC_APP_PRIVATE_KEY }}
           owner: allocator-one
-          repositories: harness-cli,infra-one-ios,browser-extension,infraone-signal-capture,docs-infra-one
+          repositories: ${{ steps.consumers.outputs.repositories }}
           permission-contents: write
           permission-pull-requests: write
 
       - name: Sync consumers
+        if: steps.consumers.outputs.count != '0'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REF: ${{ steps.ref.outputs.ref }}
