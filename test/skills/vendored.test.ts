@@ -210,9 +210,15 @@ describe('the skill text is npm rcl\'s own (CLI-179 port)', () => {
     expect(text).toContain('the user removes it');
   });
 
-  it('forwards only exported variables through the launch helper', () => {
+  it('forwards only exported variables through the launch helper, asking a child shell, not parsing `export -p`', () => {
     const text = rcl();
-    expect(text).toContain('rcl_exported=$(export -p)');
-    expect(text).toContain('only a variable that is exported, not a shell variable that merely has the name, is forwarded');
+    expect(text).toContain('rcl_set=$(/bin/sh -c "printf %s \\"\\${$name+set}\\"")');
+    expect(text).not.toMatch(/export -p|typeset -x|declare -x/);
+  });
+
+  it('adopts an unsuffixed legacy ledger only when it is this branch\'s, and counts any comment with the final marker', () => {
+    expect(converge()).toContain('git merge-base --is-ancestor <that sha> HEAD');
+    expect(converge()).toContain('belongs to another branch whose name sanitizes the same');
+    expect(converge()).toContain('when any comment already carries that marker, whoever posted it');
   });
 });

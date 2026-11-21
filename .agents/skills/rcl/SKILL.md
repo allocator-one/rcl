@@ -282,12 +282,11 @@ rcl_run() {
   done
   [ -n "$RCL_SAFE_PATH" ] || { echo "no PATH entry is left outside the repository under review" >&2; return 1; }
   set -- "PATH=${RCL_SAFE_PATH#:}" "$@"
-  rcl_exported=$(export -p)
   for name in HOME USER LANG LC_ALL TERM TMPDIR XDG_CONFIG_HOME RCL_TELEMETRY RCL_DEBUG \
       ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY \
       OPENAI_COMPAT_API_KEY OPENAI_COMPAT_BASE_URL HARNESS_API_TOKEN HARNESS_API_URL; do
-    # only a variable that is exported, not a shell variable that merely has the name, is forwarded
-    case "$rcl_exported" in *"export $name="*|*"declare -x $name="*) eval "rcl_set=\${$name+set}" ;; *) rcl_set="" ;; esac
+    # a child shell sees only exported variables: a shell variable that merely has the name is not forwarded
+    rcl_set=$(/bin/sh -c "printf %s \"\${$name+set}\"")
     if [ -n "$rcl_set" ]; then eval "rcl_value=\${$name}"; set -- "$name=$rcl_value" "$@"; fi
   done
   /usr/bin/env -i "$@"
