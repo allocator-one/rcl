@@ -226,6 +226,9 @@ describe('the skill text is npm rcl\'s own (CLI-179 port)', () => {
     expect(converge()).not.toContain('rcl-converge-final:<TARGET>');
     expect(converge()).toContain('issues/<PR_NUMBER>/comments --paginate');
     expect(converge()).not.toContain('--json comments');
+    expect(converge()).toContain('select(contains("<the marker>")) | 1');
+    expect(converge()).toContain('[ ! -e "$RCL_TMP/.npmrc" ]');
+    expect(rcl()).toContain('RCL_TELEMETRY RCL_DEBUG RCL_DATA_DIR');
     // an npm configuration already in the private directory stops the install steps
     expect(rcl()).toContain('[ ! -e "$RCL_TMP/.npmrc" ]');
   });

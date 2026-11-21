@@ -291,7 +291,7 @@ rcl_run() {
   done
   [ -n "$RCL_SAFE_PATH" ] || { echo "no PATH entry is left outside the repository under review" >&2; return 1; }
   set -- "PATH=${RCL_SAFE_PATH#:}" "$@"
-  for name in HOME USER LANG LC_ALL TERM TMPDIR XDG_CONFIG_HOME RCL_TELEMETRY RCL_DEBUG \
+  for name in HOME USER LANG LC_ALL TERM TMPDIR XDG_CONFIG_HOME RCL_TELEMETRY RCL_DEBUG RCL_DATA_DIR \
       ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY \
       OPENAI_COMPAT_API_KEY OPENAI_COMPAT_BASE_URL HARNESS_API_TOKEN HARNESS_API_URL; do
     # a child shell sees only exported variables: a shell variable that merely has the name is not forwarded
