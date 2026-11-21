@@ -66,10 +66,18 @@ describe('vendored skills', () => {
         expect(content, path).toContain('never pin a version');
         expect(content, path).toContain('npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
         // The legacy package owns the same `rcl` bin; it must be removed before the install, never installed.
-        expect(content, path).toContain('npm uninstall -g --ignore-scripts review-council &&\n  npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
+        expect(content, path).toContain('(cd <RCL_TMP> && npm uninstall -g --ignore-scripts review-council &&\n  npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
+        expect(content.split('no PATH entry is left outside the repository under review').length - 1, path).toBe(2);
         expect(content, path).not.toMatch(/npm (install|view)[^\n]*review-council@/);
         expect(content, path).toContain('Bash(npm view @allocator-one/rcl:*)');
-        expect(content, path).toContain('dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null)" = "<RCL_INTEGRITY>"');
+        expect(content, path).toContain('dist.integrity --prefix <RCL_TMP> --registry https://registry.npmjs.org --@allocator-one:registry=https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true)" = "<RCL_INTEGRITY>"');
+        // --ca=null/--cafile=null hang or fail on npm 11 (CLI-179); a project .npmrc is kept out by running from the private directory.
+        for (const block of content.match(/```bash\n[\s\S]*?\n```/g) ?? []) {
+          if (/\bnpm /.test(block)) expect(block, path).not.toMatch(/--ca=null|--cafile=null/);
+          expect(block, path).not.toMatch(/printenv|\| tr /);
+        }
+        expect(content, path).toContain('--@allocator-one:registry=https://registry.npmjs.org');
+        expect(content, path).toContain('/usr/bin/env -i "$@"');
         expect(content, path).toContain('--registry https://registry.npmjs.org');
         expect(content, path).toContain('--proxy=null');
         expect(content, path).not.toContain('NPM_TRUST_FLAGS');
@@ -172,5 +180,61 @@ describe('sync consumers', () => {
   it('own exactly the directories of the files they write', () => {
     const dirs = new Set([...vendored().keys()].map((path) => path.slice(0, path.lastIndexOf('/'))));
     expect([...dirs].sort()).toEqual([...(ownedDirs() as string[])].sort());
+  });
+});
+
+describe('the skill text is npm rcl\'s own (CLI-179 port)', () => {
+  const rcl = () => readSource('rcl') as string;
+  const converge = () => readSource('rcl-converge') as string;
+
+  it('names no fork-only marker, command or feature', () => {
+    for (const text of [rcl(), converge()]) {
+      expect(text).not.toMatch(/infraone[- ]rcl/);
+      expect(text).not.toMatch(/--code-view|code index|harness code|view_changed|@allocator-one\/infraone/i);
+    }
+    expect(converge()).toContain('<!-- rcl-converge-final:<REPO>#<PR_NUMBER>:<HEAD_SHA> -->');
+  });
+
+  it('keeps distinct names apart: a replaced or cut component, and the checkout path, are hashed (12 hex)', () => {
+    for (const text of [rcl(), converge()]) {
+      expect(text).toContain('first 12 hex characters of the SHA-256 of the absolute path of');
+      expect(text).toMatch(/replaced or cut also ends in `-` and the first 12 hex characters of the SHA-256 of its original text/);
+      expect(text).not.toContain('first 8 hex characters');
+    }
+  });
+
+  it('never reclaims a stale lock itself, and says why', () => {
+    const text = converge();
+    expect(text).toContain('Never remove it yourself');
+    expect(text).not.toContain('<lock>.reclaim');
+    expect(text).toContain('the user removes it');
+  });
+
+  it('forwards only exported variables through the launch helper, asking a child shell, not parsing `export -p`', () => {
+    const text = rcl();
+    expect(text).toContain('rcl_set=$(/bin/sh -c "printf %s \\"\\${$name+set}\\"")');
+    expect(text).not.toMatch(/export -p|typeset -x|declare -x/);
+  });
+
+  it('adopts an unsuffixed legacy ledger only when it is this branch\'s, and counts any comment with the final marker', () => {
+    expect(converge()).toContain('git merge-base --is-ancestor <that sha> HEAD');
+    expect(converge()).toContain('adopt it only on their yes');
+    expect(converge()).toContain('belongs to another branch whose name sanitizes the same');
+    // the marker is the same from every checkout, and the comment lookup is not one bounded page
+    expect(converge()).toContain('<!-- rcl-converge-final:<REPO>#<PR_NUMBER>:<HEAD_SHA> -->');
+    expect(converge()).not.toContain('rcl-converge-final:<TARGET>');
+    expect(converge()).toContain('issues/<PR_NUMBER>/comments --paginate');
+    expect(converge()).not.toContain('--json comments');
+    expect(converge()).toContain('select(contains("<the marker>")) | 1');
+    expect(converge()).toContain('[ ! -e "$RCL_TMP/.npmrc" ] && [ ! -L "$RCL_TMP/.npmrc" ] && [ ! -L "$RCL_TMP/package.json" ]');
+    expect(rcl()).toContain('[ ! -L "$RCL_TMP/package.json" ]');
+    // only a repository owner, member or collaborator can have posted the marker that silences the summary
+    expect(converge()).toContain('author_association == "OWNER"');
+    expect(converge()).toContain('or .user.login == "<LOGIN>"');
+    expect(converge()).toContain('when the lookup itself fails, post nothing and tell the user');
+    expect(converge()).toContain('in lower case');
+    expect(rcl()).toContain('RCL_TELEMETRY RCL_DEBUG RCL_DATA_DIR');
+    // an npm configuration already in the private directory stops the install steps
+    expect(rcl()).toContain('[ ! -e "$RCL_TMP/.npmrc" ]');
   });
 });
