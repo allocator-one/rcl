@@ -220,14 +220,18 @@ describe('the skill text is npm rcl\'s own (CLI-179 port)', () => {
     expect(converge()).toContain('git merge-base --is-ancestor <that sha> HEAD');
     expect(converge()).toContain('adopt it only on their yes');
     expect(converge()).toContain('belongs to another branch whose name sanitizes the same');
-    expect(converge()).toContain('when any comment already carries that marker, whoever posted it');
     // the marker is the same from every checkout, and the comment lookup is not one bounded page
     expect(converge()).toContain('<!-- rcl-converge-final:<REPO>#<PR_NUMBER>:<HEAD_SHA> -->');
     expect(converge()).not.toContain('rcl-converge-final:<TARGET>');
     expect(converge()).toContain('issues/<PR_NUMBER>/comments --paginate');
     expect(converge()).not.toContain('--json comments');
     expect(converge()).toContain('select(contains("<the marker>")) | 1');
-    expect(converge()).toContain('[ ! -e "$RCL_TMP/.npmrc" ]');
+    expect(converge()).toContain('[ ! -e "$RCL_TMP/.npmrc" ] && [ ! -L "$RCL_TMP/.npmrc" ] && [ ! -L "$RCL_TMP/package.json" ]');
+    expect(rcl()).toContain('[ ! -L "$RCL_TMP/package.json" ]');
+    // only a repository owner, member or collaborator can have posted the marker that silences the summary
+    expect(converge()).toContain('author_association == "OWNER"');
+    expect(converge()).toContain('when the lookup itself fails, post nothing and tell the user');
+    expect(converge()).toContain('in lower case');
     expect(rcl()).toContain('RCL_TELEMETRY RCL_DEBUG RCL_DATA_DIR');
     // an npm configuration already in the private directory stops the install steps
     expect(rcl()).toContain('[ ! -e "$RCL_TMP/.npmrc" ]');
