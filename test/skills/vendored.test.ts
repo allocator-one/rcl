@@ -192,7 +192,7 @@ describe('the skill text is npm rcl\'s own (CLI-179 port)', () => {
       expect(text).not.toMatch(/infraone[- ]rcl/);
       expect(text).not.toMatch(/--code-view|code index|harness code|view_changed|@allocator-one\/infraone/i);
     }
-    expect(converge()).toContain('<!-- rcl-converge-final:<TARGET>:<HEAD_SHA> -->');
+    expect(converge()).toContain('<!-- rcl-converge-final:<REPO>#<PR_NUMBER>:<HEAD_SHA> -->');
   });
 
   it('keeps distinct names apart: a replaced or cut component, and the checkout path, are hashed (12 hex)', () => {
@@ -218,7 +218,15 @@ describe('the skill text is npm rcl\'s own (CLI-179 port)', () => {
 
   it('adopts an unsuffixed legacy ledger only when it is this branch\'s, and counts any comment with the final marker', () => {
     expect(converge()).toContain('git merge-base --is-ancestor <that sha> HEAD');
+    expect(converge()).toContain('adopt it only on their yes');
     expect(converge()).toContain('belongs to another branch whose name sanitizes the same');
     expect(converge()).toContain('when any comment already carries that marker, whoever posted it');
+    // the marker is the same from every checkout, and the comment lookup is not one bounded page
+    expect(converge()).toContain('<!-- rcl-converge-final:<REPO>#<PR_NUMBER>:<HEAD_SHA> -->');
+    expect(converge()).not.toContain('rcl-converge-final:<TARGET>');
+    expect(converge()).toContain('issues/<PR_NUMBER>/comments --paginate');
+    expect(converge()).not.toContain('--json comments');
+    // an npm configuration already in the private directory stops the install steps
+    expect(rcl()).toContain('[ ! -e "$RCL_TMP/.npmrc" ]');
   });
 });

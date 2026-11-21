@@ -58,10 +58,11 @@ All temporary artifacts below (patches, specs, reports, logs, PID files) live un
 
 ```bash
 RCL_TMP=/tmp/rcl-$(id -u); mkdir -p "$RCL_TMP" && [ ! -L "$RCL_TMP" ] && [ -d "$RCL_TMP" ] && [ -O "$RCL_TMP" ] && chmod 0700 "$RCL_TMP" &&
+  [ ! -e "$RCL_TMP/.npmrc" ] &&
   { [ -e "$RCL_TMP/package.json" ] || printf '{"private":true}\n' > "$RCL_TMP/package.json"; }
 ```
 
-Order matters: the symlink and ownership checks run **before** `chmod`, because a `chmod` on a pre-created symlink would follow it and re-permission someone else's directory before the check could reject it. If any check fails, stop — never write artifacts to a directory you do not exclusively own. `<RCL_TMP>` below is a **textual placeholder**: substitute the resolved path (e.g. `/tmp/rcl-501`) when writing each command, rather than relying on `$RCL_TMP` surviving into a detached or single-quoted shell. Shell-quote every dynamic value that enters a generated command.
+An `.npmrc` already in that directory stops the command (npm would read it as this project's configuration, which is exactly what the private prefix is there to avoid): look at it and remove it yourself, never run npm with it present. Order matters: the symlink and ownership checks run **before** `chmod`, because a `chmod` on a pre-created symlink would follow it and re-permission someone else's directory before the check could reject it. If any check fails, stop — never write artifacts to a directory you do not exclusively own. `<RCL_TMP>` below is a **textual placeholder**: substitute the resolved path (e.g. `/tmp/rcl-501`) when writing each command, rather than relying on `$RCL_TMP` surviving into a detached or single-quoted shell. Shell-quote every dynamic value that enters a generated command.
 
 The `package.json` in that directory makes it the project root for npm. Without one, npm walks up from the working directory to the nearest ancestor holding a `package.json` or `node_modules` and reads that directory's `.npmrc`, so another local user who plants both in `/tmp` would decide which registry, proxy and certificates the `npm` commands of step 3 use (checked: a planted parent `package.json` and `.npmrc` hang `npm view` from a child directory; a `package.json` in the child stops the walk).
 
