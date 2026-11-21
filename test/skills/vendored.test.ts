@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error -- plain ESM build script, no type declarations
 import { readSource, render, renderVendored, renderAll, SKILLS, TARGETS } from '../../scripts/build-skills.mjs';
 // @ts-expect-error -- plain ESM script, no type declarations
-import { readConsumers, renderVendoredFiles, ownedDirs } from '../../scripts/sync-skills.mjs';
+import { consumerRepositoryNames, readConsumers, renderVendoredFiles, ownedDirs } from '../../scripts/sync-skills.mjs';
 
 type Target = { dir: string; flavor: string; prefix: string };
 const REF = 'v9.9.9';
@@ -107,6 +110,9 @@ describe('vendored skills', () => {
 });
 
 describe('sync consumers', () => {
+  const root = fileURLToPath(new URL('../..', import.meta.url));
+  const workflow = () => readFileSync(join(root, '.github/workflows/sync-skills.yml'), 'utf8');
+
   it('lists each consumer once, never rcl itself or allocator-one', () => {
     const repos = (readConsumers() as Array<{ repo: string }>).map(({ repo }) => repo);
     expect(new Set(repos).size).toBe(repos.length);
@@ -114,11 +120,61 @@ describe('sync consumers', () => {
     expect(repos).not.toContain('allocator-one/allocator-one');
   });
 
-  it('match the repositories the sync workflow token can reach', () => {
-    const workflow = readFileSync(fileURLToPath(new URL('../../.github/workflows/sync-skills.yml', import.meta.url)), 'utf8');
-    const listed = workflow.match(/^\s+repositories: (.+)$/m)?.[1].split(',').map((name) => name.trim()) ?? [];
-    const repos = (readConsumers() as Array<{ repo: string }>).map(({ repo }) => repo.split('/')[1]);
-    expect(listed.sort()).toEqual(repos.sort());
+  it('has no Infra One repository that vendors from the infraone fork (RCL-257)', () => {
+    const file = readFileSync(join(root, 'skills/consumers.json'), 'utf8');
+    const repos = (readConsumers() as Array<{ repo: string }>).map(({ repo }) => repo);
+    for (const name of ['harness-cli', 'infra-one-ios', 'browser-extension', 'infraone-signal-capture', 'docs-infra-one']) {
+      expect(repos, name).not.toContain(`allocator-one/${name}`);
+      expect(workflow(), name).not.toContain(name);
+    }
+    expect(repos).toEqual([]);
+    // the file says why and where those repositories get their skills now
+    expect(JSON.parse(file).comment).toMatch(/infraone fork/);
+    expect(JSON.parse(file).comment).toMatch(/harness-cli/);
+  });
+
+  it('accept an empty list and still validate the entries', () => {
+    const write = (value: unknown) => { const path = join(mkdtempSync(join(tmpdir(), 'rcl-consumers-')), 'consumers.json'); writeFileSync(path, JSON.stringify(value)); return path; };
+    expect(readConsumers(write({ consumers: [] }))).toEqual([]);
+    expect(() => readConsumers(write({ consumers: 'x' }))).toThrow(/consumers array/);
+    expect(() => readConsumers(write({ consumers: [{ repo: 'allocator-one/rcl', base: 'main' }] }))).toThrow(/own skills/);
+    expect(() => readConsumers(write({ consumers: [{ repo: 'bad repo', base: 'main' }] }))).toThrow(/invalid consumer/);
+    // the app token is minted for allocator-one only: a consumer under another owner could never be written
+    expect(() => readConsumers(write({ consumers: [{ repo: 'someone-else/app', base: 'main' }] }))).toThrow(/outside the allocator-one organization/);
+    expect(readConsumers(write({ consumers: [{ repo: 'allocator-one/outside-app', base: 'main' }] }))).toHaveLength(1);
+    // GitHub names are case-insensitive: the owner check, the self check and the duplicate check agree
+    expect(readConsumers(write({ consumers: [{ repo: 'Allocator-One/Outside-App', base: 'main' }] }))).toHaveLength(1);
+    expect(() => readConsumers(write({ consumers: [{ repo: 'Allocator-One/RCL', base: 'main' }] }))).toThrow(/own skills/);
+    expect(() => readConsumers(write({ consumers: [{ repo: 'allocator-one/a', base: 'main' }, { repo: 'Allocator-One/A', base: 'main' }] }))).toThrow(/duplicate/);
+    expect(consumerRepositoryNames([{ repo: 'a/one', base: 'main' }, { repo: 'a/two', base: 'main' }])).toBe('one,two');
+    expect(consumerRepositoryNames([])).toBe('');
+  });
+
+  it('is a clean no-op with no consumers: it says so and exits 0 before touching git, GitHub or the network', () => {
+    const run = (...args: string[]) => spawnSync(process.execPath, ['scripts/sync-skills.mjs', ...args], { cwd: root, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', GH_TOKEN: '' } });
+    const noop = run('--ref', 'v9.9.9');
+    expect(noop.status, noop.stderr).toBe(0);
+    expect(noop.stdout).toMatch(/no consumers configured/);
+    const names = run('--print-repositories');
+    expect(names.status, names.stderr).toBe(0);
+    expect(names.stdout).toBe('\n');
+    // naming a consumer that is not configured is still an error, never a silent no-op
+    const unconfigured = run('--ref', 'v9.9.9', '--only', 'allocator-one/harness-cli');
+    expect(unconfigured.status).toBe(1);
+    expect(unconfigured.stderr).toMatch(/allocator-one\/harness-cli is not a configured consumer/);
+  });
+
+  it('derive the workflow token and sync from the consumer list, and skip both when it is empty', () => {
+    const text = workflow();
+    expect(text).toContain('repositories: ${{ steps.consumers.outputs.repositories }}');
+    expect(text).not.toMatch(/^\s+repositories: [a-z]/m);
+    expect(text).toMatch(/- name: Read consumers\n\s+id: consumers\n\s+run: \|\n\s+repos=\$\(node scripts\/sync-skills\.mjs --print-repositories\)/);
+    // Both steps that need the app credentials run only with consumers.
+    for (const step of ['Generate token', 'Sync consumers']) {
+      const block = text.slice(text.indexOf(`- name: ${step}`));
+      expect(block.slice(0, block.indexOf('\n      - ', 5) === -1 ? undefined : block.indexOf('\n      - ', 5)), step).toContain("if: steps.consumers.outputs.count != '0'");
+    }
+    expect(text.indexOf('name: Read consumers')).toBeLessThan(text.indexOf('name: Generate token'));
   });
 
   it('own exactly the directories of the files they write', () => {
