@@ -976,12 +976,11 @@ They are not part of the npm package.
 
 Both are rendered from one source per skill, `skills/src/rcl.md` and
 `skills/src/rcl-converge.md`: `npm run build:skills` writes the host-specific
-copies to `.claude/skills/`, `.agents/skills/` and `.codex/skills/`. After each
-release, a sync workflow opens or updates one `rcl-skill-sync` pull request in
-every repository listed in
+copies to `.claude/skills/`, `.agents/skills/` and `.codex/skills/`. A sync
+workflow can open or update one `rcl-skill-sync` pull request after each release in every repository listed in
 [`skills/consumers.json`](https://github.com/allocator-one/rcl/blob/main/skills/consumers.json)
-with repository-neutral copies rendered from the released tag, so consumers
-only receive skills that match a published CLI. Other repositories can copy the
+with repository-neutral copies rendered from the released tag; that list is empty today, because
+Infra One repositories vendor their skills from the `infraone rcl` fork. Other repositories can copy the
 `SKILL.md` files from a release tag into the same directories; the copies in
 this repository carry a few notes that apply only to rcl's own checkout.
 

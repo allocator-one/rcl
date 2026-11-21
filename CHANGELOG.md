@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Stop the **Sync skills** workflow from opening pull requests in the five Infra
+  One repositories that now vendor their `/rcl` skills from the infraone fork:
+  `skills/consumers.json` is empty, the workflow reads it, says "No consumers
+  configured" and succeeds without minting a token, and the app token's
+  `repositories` come from that file instead of a second hard-coded list
+  (RCL-257).
+
 ## 4.5.47 - 2026-11-19
 
 - Make `google/gemini-4-hydrogen` the default secondary specialist reviewer,

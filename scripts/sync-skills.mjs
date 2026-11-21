@@ -3,6 +3,12 @@
  * Sync the vendored rcl and rcl-converge skills into every consumer repository.
  *
  *   node scripts/sync-skills.mjs --ref v4.5.0 [--only owner/repo] [--dry-run]
+ *   node scripts/sync-skills.mjs --print-repositories
+ *
+ * With no consumers in skills/consumers.json (the case today) a sync prints
+ * "no consumers" and exits 0 without touching the checkout, GitHub or the network;
+ * `--print-repositories` prints the consumers' repository names, comma-separated
+ * and empty when there are none, for the workflow's app-token step.
  *
  * Renders the skills from this checkout (which must be at --ref) with
  * `renderVendored`, then for each repository in skills/consumers.json: clones its
@@ -25,7 +31,8 @@ const REPO_PATTERN = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 
 export function readConsumers(path = join(ROOT, 'skills', 'consumers.json')) {
   const { consumers } = JSON.parse(readFileSync(path, 'utf8'));
-  if (!Array.isArray(consumers) || consumers.length === 0) throw new Error('no consumers configured');
+  // An empty list is valid: the workflow then has nothing to sync and says so.
+  if (!Array.isArray(consumers)) throw new Error('skills/consumers.json must hold a consumers array');
   const seen = new Set();
   for (const { repo, base } of consumers) {
     if (!REPO_PATTERN.test(repo ?? '')) throw new Error(`invalid consumer repository: ${repo}`);
@@ -35,6 +42,11 @@ export function readConsumers(path = join(ROOT, 'skills', 'consumers.json')) {
     seen.add(repo);
   }
   return consumers;
+}
+
+/** The consumer repository names without their owner, comma-separated: the app token's `repositories` input. */
+export function consumerRepositoryNames(consumers = readConsumers()) {
+  return consumers.map(({ repo }) => repo.split('/')[1]).join(',');
 }
 
 /** Every vendored file, keyed by repository-relative path. */
@@ -147,7 +159,7 @@ function syncOne({ repo, base }, ref, files, dryRun) {
 }
 
 function parseArgs(argv) {
-  const args = { ref: null, only: null, dryRun: false };
+  const args = { ref: null, only: null, dryRun: false, printRepositories: false };
   const nextValue = (flag, i) => {
     const value = argv[i + 1];
     if (value === undefined || value.startsWith('--')) throw new Error(`${flag} requires a value`);
@@ -158,9 +170,10 @@ function parseArgs(argv) {
     if (arg === '--ref') args.ref = nextValue(arg, i++);
     else if (arg === '--only') args.only = nextValue(arg, i++);
     else if (arg === '--dry-run') args.dryRun = true;
+    else if (arg === '--print-repositories') args.printRepositories = true;
     else throw new Error(`unknown argument: ${arg}`);
   }
-  if (!args.ref) throw new Error('--ref <tag or commit> is required');
+  if (!args.ref && !args.printRepositories) throw new Error('--ref <tag or commit> is required');
   return args;
 }
 
@@ -183,10 +196,19 @@ function assertCheckoutMatchesRef(ref) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const { ref, only, dryRun } = parseArgs(process.argv.slice(2));
+  const { ref, only, dryRun, printRepositories } = parseArgs(process.argv.slice(2));
+  const configured = readConsumers();
+  if (printRepositories) {
+    console.log(consumerRepositoryNames(configured));
+    process.exit(0);
+  }
+  if (configured.length === 0 && !only) {
+    console.log(`no consumers configured in skills/consumers.json; nothing to sync for ${ref}`);
+    process.exit(0);
+  }
   assertCheckoutMatchesRef(ref);
   const files = renderVendoredFiles(ref);
-  const consumers = readConsumers().filter((consumer) => !only || consumer.repo === only);
+  const consumers = configured.filter((consumer) => !only || consumer.repo === only);
   if (only && consumers.length === 0) throw new Error(`${only} is not a configured consumer`);
   let failed = 0;
   for (const consumer of consumers) {

@@ -118,18 +118,26 @@ and give consumers repository-neutral wording in `{{#vendored}}…{{/vendored}}`
 After every successful **Release**, `.github/workflows/sync-skills.yml` renders
 the vendored copies from the released tag and runs `scripts/sync-skills.mjs`,
 which opens or updates one `rcl-skill-sync` pull request in every repository in
-`skills/consumers.json`. Consumers therefore only receive skills that match a
-published CLI. The skill directories in those repositories belong to the sync:
-their own review rules go in their `AGENTS.md` or `CLAUDE.md`. allocator-one
-keeps its own, repository-specific lineage and is not a consumer.
+`skills/consumers.json`. **That list is empty today.** Since CLI-171 the Infra
+One repositories (harness-cli, infra-one-ios, browser-extension,
+infraone-signal-capture, docs-infra-one) vendor the `/rcl` and `/rcl-converge`
+skills from the infraone fork (allocator-one/harness-cli,
+`scripts/vendor-skills.mjs`), whose text differs from this repository's:
+a sync PR from here would overwrite it (RCL-257). allocator-one keeps its own,
+repository-specific lineage and is not a consumer either. With no consumers
+the workflow reads the list, says "No consumers configured", mints no token and
+succeeds.
 
-The workflow needs a GitHub App with Contents and Pull requests write access,
-installed on exactly the consumer repositories: its client ID in the
-`RCL_SKILL_SYNC_APP_ID` variable and its private key in the
-`RCL_SKILL_SYNC_APP_PRIVATE_KEY` secret. To add a consumer, add it to
-`skills/consumers.json`, to the workflow's `repositories:` list (a test keeps
-them equal) and to the app installation. To resync by hand, dispatch the
-workflow with a released tag, or run
+The mechanism stays for an outside consumer that may be added later. It needs a
+GitHub App with Contents and Pull requests write access, installed on exactly
+the consumer repositories: its client ID in the `RCL_SKILL_SYNC_APP_ID`
+variable and its private key in the `RCL_SKILL_SYNC_APP_PRIVATE_KEY` secret.
+To add a consumer, add it to `skills/consumers.json` (the workflow derives the
+app token's `repositories` from that file, so there is no second list) and to the
+app installation. The skill directories in a consumer belong to the sync: their
+own review rules go in their `AGENTS.md` or `CLAUDE.md`. To resync by hand,
+dispatch the workflow with a released tag (a tag older than the consumer-less
+workflow lacks `--print-repositories`, so it fails closed), or run
 `GH_TOKEN=… node scripts/sync-skills.mjs --ref vX.Y.Z [--only owner/repo] [--dry-run]`
 from a checkout of that tag.
 
